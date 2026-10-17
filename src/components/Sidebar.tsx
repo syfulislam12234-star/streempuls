@@ -18,6 +18,7 @@ import {
   Activity,
   Layers,
   ExternalLink,
+  Mail,
 } from 'lucide-react';
 import { UserProfile } from '../services/apiClient';
 import logoImg from '../assets/images/streampulse_logo_1791782499836.jpg';
@@ -38,6 +39,7 @@ export interface SidebarProps {
   onOpenAuthModal: () => void;
   onOpenTutorials?: () => void;
   onOpenNotificationsModal?: () => void;
+  onOpenGmail?: () => void;
   onOpenLegal?: (tab?: 'terms' | 'privacy', sectionId?: string) => void;
   onLogout: () => void;
 }
@@ -58,6 +60,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenAuthModal,
   onOpenTutorials,
   onOpenNotificationsModal,
+  onOpenGmail,
   onOpenLegal,
   onLogout,
 }) => {
@@ -90,6 +93,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
       isActive: false,
       onClick: () => {
         onOpenPlanModal();
+        onCloseMobile();
+      },
+    },
+    {
+      id: 'gmail',
+      label: 'Gmail & Email Alerts',
+      icon: Mail,
+      badge: 'Google',
+      badgeColor: 'bg-red-950 text-red-400 border-red-500/30',
+      isActive: false,
+      onClick: () => {
+        if (onOpenGmail) onOpenGmail();
         onCloseMobile();
       },
     },

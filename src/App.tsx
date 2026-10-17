@@ -12,6 +12,7 @@ import { NotificationsCenterModal } from './components/NotificationsCenterModal'
 import { LegalTermsModal } from './components/LegalTermsModal';
 import { TutorialsModal } from './components/TutorialsModal';
 import { AdminDashboardPortal } from './components/AdminDashboardPortal';
+import { GmailManagerModal } from './components/GmailManagerModal';
 import { apiClient, UserProfile } from './services/apiClient';
 import { Loader2 } from 'lucide-react';
 import { RealtimeSyncProvider, useRealtimeSync } from './context/RealtimeSyncContext';
@@ -43,6 +44,7 @@ function MainApp() {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
   const [isNotificationsModalOpen, setIsNotificationsModalOpen] = useState<boolean>(false);
   const [isTutorialsModalOpen, setIsTutorialsModalOpen] = useState<boolean>(false);
+  const [isGmailModalOpen, setIsGmailModalOpen] = useState<boolean>(false);
   const [isLegalModalOpen, setIsLegalModalOpen] = useState<boolean>(false);
   const [legalInitialTab, setLegalInitialTab] = useState<'terms' | 'privacy'>('terms');
   const [legalInitialSection, setLegalInitialSection] = useState<string | undefined>(undefined);
@@ -186,6 +188,7 @@ function MainApp() {
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
         onOpenTutorials={() => setIsTutorialsModalOpen(true)}
         onOpenNotificationsModal={() => setIsNotificationsModalOpen(true)}
+        onOpenGmail={() => setIsGmailModalOpen(true)}
         onOpenLegal={handleOpenLegal}
         onLogout={handleLogout}
       />
@@ -348,6 +351,12 @@ function MainApp() {
         isOpen={isTutorialsModalOpen}
         onClose={() => setIsTutorialsModalOpen(false)}
         currentUser={currentUser}
+      />
+
+      {/* Gmail Integration Modal */}
+      <GmailManagerModal
+        isOpen={isGmailModalOpen}
+        onClose={() => setIsGmailModalOpen(false)}
       />
 
       {/* Real-Time Auto-Sync Live Toast Notification */}
