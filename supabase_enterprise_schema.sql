@@ -1,0 +1,299 @@
+-- ============================================================================
+-- StreamPulse Enterprise PostgreSQL & Supabase Database Migration
+-- Covers:
+-- 1. User Profiles & Subscriptions (with Expiry Tracking & Referral Balances)
+-- 2. Referral & Affiliate Tracking
+-- 3. Promo Codes & Discount Coupons
+-- 4. In-App Automated Expiry & Renewal Notifications
+-- 5. Multi-Platform Multi-Casting Stream Destinations (Restreaming)
+-- 6. Real-Time Telemetry & Health Metrics Logs
+-- ============================================================================
+
+-- Enable UUID extension
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- ----------------------------------------------------------------------------
+-- 1. PROFILES TABLE
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.profiles (
+  id TEXT PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  full_name TEXT,
+  role VARCHAR(20) DEFAULT 'user' CHECK (role IN ('user', 'admin')),
+  subscription_tier VARCHAR(20) DEFAULT 'free' CHECK (subscription_tier IN ('free', 'basic', 'pro', 'business')),
+  subscription_status VARCHAR(20) DEFAULT 'unpaid' CHECK (subscription_status IN ('pending', 'unpaid', 'active', 'cancelled', 'expired')),
+  channel_limit INT DEFAULT 1,
+  video_limit INT DEFAULT 1,
+  duration_days INT DEFAULT 3,
+  hour_limit INT DEFAULT 10,
+  has_watermark BOOLEAN DEFAULT TRUE,
+  is_brand_free BOOLEAN DEFAULT FALSE,
+  price_bdt NUMERIC(10, 2) DEFAULT 0,
+  expires_at TIMESTAMPTZ,
+  referral_code VARCHAR(30) UNIQUE,
+  referred_by_code VARCHAR(30),
+  reward_credits_bdt NUMERIC(10, 2) DEFAULT 0,
+  trial_days_bonus INT DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Index for speedy lookups
+CREATE INDEX IF NOT EXISTS idx_profiles_email ON public.profiles(email);
+CREATE INDEX IF NOT EXISTS idx_profiles_ref_code ON public.profiles(referral_code);
+CREATE INDEX IF NOT EXISTS idx_profiles_sub_status ON public.profiles(subscription_status);
+CREATE INDEX IF NOT EXISTS idx_profiles_expires_at ON public.profiles(expires_at);
+
+-- ----------------------------------------------------------------------------
+-- 2. USER REFERRALS TABLE
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.user_referrals (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  referrer_user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  referred_user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  invite_code VARCHAR(30) NOT NULL,
+  reward_type VARCHAR(50) NOT NULL CHECK (reward_type IN ('trial_extension_days', 'discount_credits')),
+  reward_value INT NOT NULL, -- e.g. 3 (days) or 200 (BDT credits)
+  status VARCHAR(20) DEFAULT 'completed' CHECK (status IN ('pending', 'completed', 'claimed')),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  redeemed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON public.user_referrals(referrer_user_id);
+CREATE INDEX IF NOT EXISTS idx_referrals_invite_code ON public.user_referrals(invite_code);
+
+-- ----------------------------------------------------------------------------
+-- 3. PROMO CODES & COUPONS TABLE
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.coupons (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code VARCHAR(50) UNIQUE NOT NULL,
+  discount_type VARCHAR(20) NOT NULL CHECK (discount_type IN ('percent', 'fixed_bdt')),
+  discount_value NUMERIC(10, 2) NOT NULL,
+  applicable_tiers TEXT[] DEFAULT '{free,basic,pro,business}',
+  max_uses INT DEFAULT 500,
+  times_used INT DEFAULT 0,
+  valid_until TIMESTAMPTZ,
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_coupons_code ON public.coupons(code);
+
+-- Seed default coupons
+INSERT INTO public.coupons (code, discount_type, discount_value, applicable_tiers, max_uses, times_used, is_active)
+VALUES
+  ('PULSE20', 'percent', 20.00, '{basic,pro,business}', 1000, 14, TRUE),
+  ('CREATOR500', 'fixed_bdt', 500.00, '{basic,pro,business}', 500, 28, TRUE),
+  ('VIP30', 'percent', 30.00, '{pro,business}', 200, 8, TRUE)
+ON CONFLICT (code) DO NOTHING;
+
+-- ----------------------------------------------------------------------------
+-- 4. IN-APP AUTOMATED NOTIFICATIONS TABLE
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.notifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  message TEXT NOT NULL,
+  type VARCHAR(30) NOT NULL CHECK (type IN ('expiry_24h', 'expiry_2h', 'expired', 'referral_reward', 'discount_alert', 'system')),
+  is_read BOOLEAN DEFAULT FALSE,
+  action_url TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON public.notifications(user_id, is_read);
+
+-- ----------------------------------------------------------------------------
+-- 4b. STREAMS TABLE ORIENTATION, CATEGORY, AUDIENCE, THUMBNAIL & VISIBILITY MIGRATION
+-- ----------------------------------------------------------------------------
+ALTER TABLE IF EXISTS public.streams 
+  ADD COLUMN IF NOT EXISTS orientation VARCHAR(20) DEFAULT 'horizontal' CHECK (orientation IN ('horizontal', 'vertical')),
+  ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT 'Entertainment',
+  ADD COLUMN IF NOT EXISTS audience VARCHAR(30) DEFAULT 'not_for_kids' CHECK (audience IN ('not_for_kids', 'made_for_kids')),
+  ADD COLUMN IF NOT EXISTS thumbnail_url TEXT,
+  ADD COLUMN IF NOT EXISTS visibility VARCHAR(20) DEFAULT 'public' CHECK (visibility IN ('public', 'unlisted', 'private', 'scheduled')),
+  ADD COLUMN IF NOT EXISTS scheduled_for TIMESTAMPTZ;
+
+-- ----------------------------------------------------------------------------
+-- 5. MULTI-PLATFORM MULTI-CAST DESTINATIONS TABLE
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.stream_destinations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  stream_id TEXT NOT NULL REFERENCES public.streams(id) ON DELETE CASCADE,
+  platform VARCHAR(30) NOT NULL CHECK (platform IN ('youtube', 'twitch', 'kick', 'custom')),
+  destination_label TEXT NOT NULL,
+  rtmp_server_url TEXT NOT NULL,
+  stream_key TEXT NOT NULL,
+  is_enabled BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_destinations_stream ON public.stream_destinations(stream_id);
+
+-- ----------------------------------------------------------------------------
+-- 6. REAL-TIME TELEMETRY LOGS TABLE
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.stream_telemetry_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  stream_id TEXT NOT NULL REFERENCES public.streams(id) ON DELETE CASCADE,
+  bitrate_kbps INT NOT NULL,
+  fps NUMERIC(5, 2) NOT NULL,
+  dropped_frames INT DEFAULT 0,
+  cpu_pct NUMERIC(5, 2) NOT NULL,
+  mem_mb NUMERIC(6, 2) NOT NULL,
+  health_status VARCHAR(20) DEFAULT 'excellent',
+  recorded_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_telemetry_stream_time ON public.stream_telemetry_logs(stream_id, recorded_at DESC);
+
+-- ----------------------------------------------------------------------------
+-- 7. TUTORIAL VIDEOS TABLE
+-- Storing guide videos with view access for all and admin-only write permissions
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.tutorial_videos (
+  id TEXT PRIMARY KEY,
+  title VARCHAR(255) NOT NULL,
+  description TEXT,
+  video_url TEXT NOT NULL,
+  youtube_id VARCHAR(50),
+  category VARCHAR(50) DEFAULT 'getting_started' CHECK (category IN ('getting_started', 'youtube_setup', 'stream_keys', 'troubleshooting', 'pro_tips')),
+  duration_minutes INT DEFAULT 5,
+  thumbnail_url TEXT,
+  created_by TEXT DEFAULT 'Admin',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tutorial_category ON public.tutorial_videos(category);
+
+-- ----------------------------------------------------------------------------
+-- Row-Level Security (RLS) Rules for Supabase
+-- ----------------------------------------------------------------------------
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.user_referrals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.coupons ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.stream_destinations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.stream_telemetry_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tutorial_videos ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies
+CREATE POLICY "Public read tutorial videos" ON public.tutorial_videos
+  FOR SELECT USING (TRUE);
+
+CREATE POLICY "Admin write tutorial videos" ON public.tutorial_videos
+  FOR ALL USING (EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid()::text AND role = 'admin'));
+
+-- RLS Policies
+CREATE POLICY "Public read active coupons" ON public.coupons
+  FOR SELECT USING (is_active = TRUE);
+
+CREATE POLICY "Users can read own profile" ON public.profiles
+  FOR SELECT USING (auth.uid()::text = id OR role = 'admin');
+
+CREATE POLICY "Users can read own notifications" ON public.notifications
+  FOR SELECT USING (auth.uid()::text = user_id);
+
+CREATE POLICY "Users can update own notifications" ON public.notifications
+  FOR UPDATE USING (auth.uid()::text = user_id);
+
+-- ----------------------------------------------------------------------------
+-- 7. AUTOMATED REFERRAL REWARD TRIGGER FUNCTION
+-- Automatically applies trial day extensions or discount credits to referrer!
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.handle_referral_reward()
+RETURNS TRIGGER AS $$
+BEGIN
+  -- If referrer is on Free Plan, extend trial duration by 3 days
+  -- If referrer is on a Paid Tier, grant 200 BDT reward credits
+  IF NEW.reward_type = 'trial_extension_days' THEN
+    UPDATE public.profiles
+    SET trial_days_bonus = COALESCE(trial_days_bonus, 0) + NEW.reward_value,
+        duration_days = duration_days + NEW.reward_value,
+        expires_at = COALESCE(expires_at, NOW()) + (NEW.reward_value || ' days')::INTERVAL,
+        updated_at = NOW()
+    WHERE id = NEW.referrer_user_id;
+  ELSIF NEW.reward_type = 'discount_credits' THEN
+    UPDATE public.profiles
+    SET reward_credits_bdt = COALESCE(reward_credits_bdt, 0) + NEW.reward_value,
+        updated_at = NOW()
+    WHERE id = NEW.referrer_user_id;
+  END IF;
+
+  -- Create in-app celebration notification for the referrer
+  INSERT INTO public.notifications (user_id, title, message, type)
+  VALUES (
+    NEW.referrer_user_id,
+    '🎁 Referral Bonus Credited!',
+    'A fellow streamer joined using your invite code (' || NEW.invite_code || '). You received ' ||
+      CASE WHEN NEW.reward_type = 'trial_extension_days'
+           THEN '+' || NEW.reward_value || ' Bonus Days'
+           ELSE '+' || NEW.reward_value || ' BDT Credits'
+      END || '!',
+    'referral_reward'
+  );
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS trg_referral_reward_applied ON public.user_referrals;
+CREATE TRIGGER trg_referral_reward_applied
+  AFTER INSERT ON public.user_referrals
+  FOR EACH ROW
+  EXECUTE FUNCTION public.handle_referral_reward();
+
+-- ----------------------------------------------------------------------------
+-- 8. MANUAL SUBSCRIPTION PAYMENT REQUESTS TABLE (bKash, Nagad & Rocket Approval Flow)
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.subscription_payment_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  user_email TEXT NOT NULL,
+  plan_tier VARCHAR(20) NOT NULL CHECK (plan_tier IN ('basic', 'pro', 'business')),
+  amount_bdt INT NOT NULL,
+  payment_method VARCHAR(20) NOT NULL CHECK (payment_method IN ('bkash', 'nagad', 'rocket')),
+  account_number VARCHAR(30) NOT NULL,
+  sender_phone VARCHAR(30),
+  trx_id VARCHAR(100) NOT NULL,
+  screenshot_url TEXT,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+  rejection_reason TEXT,
+  coupon_code VARCHAR(50),
+  discount_bdt INT DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  approved_at TIMESTAMPTZ,
+  approved_by UUID REFERENCES public.profiles(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_requests_user ON public.subscription_payment_requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_payment_requests_status ON public.subscription_payment_requests(status);
+CREATE INDEX IF NOT EXISTS idx_payment_requests_trx ON public.subscription_payment_requests(trx_id);
+
+ALTER TABLE public.subscription_payment_requests ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "payment_requests_select_policy"
+  ON public.subscription_payment_requests
+  FOR SELECT USING (auth.uid() = user_id OR auth.role() = 'service_role' OR public.is_admin(auth.uid()));
+
+CREATE POLICY "payment_requests_insert_policy"
+  ON public.subscription_payment_requests
+  FOR INSERT WITH CHECK (auth.uid() = user_id OR auth.role() = 'service_role');
+
+CREATE POLICY "payment_requests_autonomous_update_policy"
+  ON public.subscription_payment_requests
+  FOR UPDATE USING (auth.role() = 'service_role' OR auth.uid() = user_id OR public.is_admin(auth.uid()));
+
+-- Autonomous System Settings & Vault Security Policy
+ALTER TABLE public.system_settings ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "system_settings_read_policy"
+  ON public.system_settings
+  FOR SELECT USING (true);
+
+CREATE POLICY "system_settings_autonomous_manage_policy"
+  ON public.system_settings
+  FOR ALL USING (auth.role() = 'service_role' OR public.is_admin(auth.uid()));

@@ -1,0 +1,15 @@
+{
+  "id": "primary_cluster",
+  "cluster_name": "Hetzner-Production-Cluster-01",
+  "cluster_mode": "production",
+  "worker_concurrency": 48,
+  "max_global_streams": 120,
+  "redis_cache_enabled": true,
+  "redis_cache_ttl_seconds": 120,
+  "bullmq_rate_limit_max": 25,
+  "heartbeat_timeout_seconds": 25,
+  "enforce_direct_copy_mode": true,
+  "supabase_storage_bucket": "stream-assets",
+  "last_scaled_at": "2026-10-07T16:42:26.591Z",
+  "updated_at": "2026-10-07T16:42:26.591Z"
+}
