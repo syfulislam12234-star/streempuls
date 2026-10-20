@@ -1,24 +1,31 @@
 import React from 'react';
 import {
-  Radio,
+  Menu,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
-  Zap,
+  ShieldCheck,
   Lock,
   User,
-  ShieldCheck,
-  CreditCard,
-  LogOut,
-  ChevronDown,
   Bell,
   BookOpen,
+  Radio,
+  ChevronRight,
 } from 'lucide-react';
 import { UserProfile } from '../services/apiClient';
 import logoImg from '../assets/images/streampulse_logo_1791782499836.jpg';
 
-interface NavbarProps {
+export interface NavbarProps {
   currentUser: UserProfile | null;
   activeStreamsCount: number;
   unreadNotificationsCount?: number;
+  currentView?: 'studio' | 'admin';
+  isSidebarCollapsed?: boolean;
+  onToggleSidebarCollapse?: () => void;
+  onOpenMobileSidebar?: () => void;
+  onNavigateStudio?: () => void;
+  onNavigateAdmin?: () => void;
+  isPlanModalOpen?: boolean;
   onOpenCreateModal: () => void;
   onOpenPlanModal: () => void;
   onOpenAuthModal: () => void;
@@ -31,6 +38,13 @@ export const Navbar: React.FC<NavbarProps> = ({
   currentUser,
   activeStreamsCount,
   unreadNotificationsCount = 0,
+  currentView = 'studio',
+  isSidebarCollapsed = false,
+  onToggleSidebarCollapse,
+  onOpenMobileSidebar,
+  onNavigateStudio,
+  onNavigateAdmin,
+  isPlanModalOpen = false,
   onOpenCreateModal,
   onOpenPlanModal,
   onOpenAuthModal,
@@ -41,152 +55,193 @@ export const Navbar: React.FC<NavbarProps> = ({
   const isPlanActive = currentUser?.subscription_status === 'active';
 
   return (
-    <header className="border-b border-slate-800/80 bg-slate-950/90 backdrop-blur-md sticky top-0 z-40">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-16">
-          {/* Brand Logo & Friendly Title */}
+    <header className="border-b border-slate-800/80 bg-slate-950/90 backdrop-blur-md sticky top-0 z-40 h-16 shrink-0 transition-all">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-full flex items-center justify-between">
+        {/* Left Side: Mobile Menu Button, Desktop Collapse Toggle & Breadcrumbs */}
+        <div className="flex items-center space-x-3">
+          {/* Mobile Sidebar Toggle Button */}
+          {onOpenMobileSidebar && (
+            <button
+              onClick={onOpenMobileSidebar}
+              className="lg:hidden p-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white transition-colors cursor-pointer"
+              aria-label="Open sidebar menu"
+              title="Open sidebar menu"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+          )}
+
+          {/* Desktop Sidebar Collapse Toggle */}
+          {onToggleSidebarCollapse && (
+            <button
+              onClick={onToggleSidebarCollapse}
+              className="hidden lg:flex p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
+              aria-label={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            >
+              {isSidebarCollapsed ? (
+                <PanelLeftOpen className="w-4 h-4" />
+              ) : (
+                <PanelLeftClose className="w-4 h-4" />
+              )}
+            </button>
+          )}
+
+          {/* Brand Logo & Breadcrumb Navigation */}
           <div className="flex items-center space-x-2.5">
-            <div className="relative flex items-center justify-center w-8 h-8 rounded-lg overflow-hidden bg-slate-900 border border-red-500/40 shadow-sm">
-              <img src={logoImg} alt="StreamPulse Logo" className="w-full h-full object-contain p-0.5" />
-              {activeStreamsCount > 0 && (
-                <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5 z-10">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+            <div
+              onClick={onNavigateStudio}
+              className="flex items-center space-x-2.5 cursor-pointer"
+            >
+              <div className="relative flex items-center justify-center w-8 h-8 rounded-lg overflow-hidden bg-slate-900 border border-slate-800 shadow-sm shrink-0">
+                <img src={logoImg} alt="StreamPulse Logo" className="w-full h-full object-contain p-0.5" />
+                {activeStreamsCount > 0 && (
+                  <span className="absolute top-0.5 right-0.5 flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                  </span>
+                )}
+              </div>
+              <span className="font-bold text-sm tracking-tight text-white hidden sm:inline">
+                StreamPulse
+              </span>
+            </div>
+
+            <ChevronRight className="w-3.5 h-3.5 text-slate-600 hidden sm:inline" />
+
+            {/* Active Workspace / Route Tag */}
+            <div className="flex items-center space-x-1.5">
+              <span className="text-xs font-semibold text-slate-300">
+                {isPlanModalOpen
+                  ? 'Plans & Billing'
+                  : currentView === 'admin'
+                  ? 'Admin Portal'
+                  : 'Live Studio'}
+              </span>
+              {currentView === 'admin' && !isPlanModalOpen && (
+                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-md bg-red-950/80 text-red-400 border border-red-800/40 hidden md:inline">
+                  admin.streampulse.io
                 </span>
               )}
             </div>
-            <div>
-              <div className="flex items-center space-x-2">
-                <span className="font-extrabold text-base tracking-tight text-white">
-                  StreamPulse
-                </span>
-                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-red-950/80 text-red-300 border border-red-800/40">
-                  Live Studio
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-400 hidden sm:block">
-                Continuous 24/7 automated broadcasting
-              </p>
-            </div>
+          </div>
+        </div>
+
+        {/* Right Side: Operational Health, Quotas, Quick Actions, Notifications & Account */}
+        <div className="flex items-center space-x-2 sm:space-x-3">
+          {/* Minimal Enterprise System Health Indicator */}
+          <div className="hidden xl:flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-[11px] text-slate-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            <span>System:</span>
+            <span className="text-slate-200 font-medium">Operational</span>
           </div>
 
-          {/* Center / Right: Subscription Tier Badge & Limits */}
-          <div className="flex items-center space-x-2.5">
-            {/* Zero-Admin Autonomous Engine Status Indicator */}
-            <div className="hidden lg:flex items-center space-x-1.5 px-2.5 py-1 rounded-xl bg-slate-900/80 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold shadow-sm shadow-emerald-950/20">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="text-slate-400">Autonomous Engine:</span>
-              <span className="text-emerald-400 font-bold">100% Active</span>
-            </div>
-            {currentUser && (
-              <button
-                onClick={onOpenPlanModal}
-                className={`hidden md:flex items-center space-x-2 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] hover:shadow-lg cursor-pointer ${
-                  isPlanActive
-                    ? currentUser.subscription_tier === 'business'
-                      ? 'bg-purple-950/40 border-purple-800/60 text-purple-300 hover:bg-purple-900/40 hover:shadow-purple-500/10'
-                      : currentUser.subscription_tier === 'pro'
-                      ? 'bg-red-950/40 border-red-800/60 text-red-300 hover:bg-red-900/40 hover:shadow-red-500/10'
-                      : currentUser.subscription_tier === 'basic'
-                      ? 'bg-blue-950/40 border-blue-800/60 text-blue-300 hover:bg-blue-900/40 hover:shadow-blue-500/10'
-                      : 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800'
-                    : 'bg-amber-950/40 border-amber-800/60 text-amber-300 hover:shadow-amber-500/10 animate-pulse'
-                }`}
-                title="Click to view or change subscription plan"
-              >
-                {isPlanActive ? (
-                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                ) : (
-                  <Lock className="w-3.5 h-3.5 text-amber-400" />
-                )}
-                <span>
-                  {isPlanActive
-                    ? `${currentUser.subscription_tier.toUpperCase()} Plan (${currentUser.channel_limit} Ch / ${currentUser.video_limit} Vid)`
-                    : 'Plan: Unpaid / Locked'}
-                </span>
-                <span className="text-[10px] text-slate-400 underline font-normal">
-                  Change
-                </span>
-              </button>
-            )}
-
-            {/* Live Status Indicator */}
-            {isPlanActive && (
-              <div
-                className={`flex items-center space-x-2 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all duration-300 ease-in-out ${
-                  activeStreamsCount > 0
-                    ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300 shadow-sm shadow-emerald-950/30'
-                    : 'bg-slate-900 border-slate-800 text-slate-400'
-                }`}
-              >
-                <span
-                  className={`w-2 h-2 rounded-full ${
-                    activeStreamsCount > 0
-                      ? 'bg-emerald-400 animate-pulse'
-                      : 'bg-slate-500'
-                  }`}
-                />
-                <span className="hidden sm:inline">
-                  {activeStreamsCount > 0
-                    ? `${activeStreamsCount} Live`
-                    : 'Ready'}
-                </span>
-              </div>
-            )}
-
-            {/* Create Live Stream Button (Only active when plan is active) */}
-            {isPlanActive && (
-              <button
-                onClick={onOpenCreateModal}
-                className="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white text-xs font-bold shadow-md shadow-red-950/60 hover:shadow-lg hover:shadow-red-900/80 transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Go Live</span>
-              </button>
-            )}
-
-            {/* Tutorials & Guide Videos Button */}
-            {onOpenTutorials && (
-              <button
-                onClick={onOpenTutorials}
-                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs font-semibold cursor-pointer transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] hover:shadow-lg hover:shadow-red-500/10"
-                title="Watch Video Guides & 24/7 Setup Tutorials"
-              >
-                <BookOpen className="w-3.5 h-3.5 text-red-400" />
-                <span className="hidden md:inline">Tutorials</span>
-              </button>
-            )}
-
-            {/* In-App Notifications & Expiry Alerts Button */}
-            {onOpenNotificationsModal && (
-              <button
-                onClick={onOpenNotificationsModal}
-                className="relative p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white cursor-pointer transition-all duration-300 ease-in-out hover:scale-105 active:scale-[0.98] hover:shadow-lg hover:shadow-slate-500/10"
-                title="In-App Notifications & Expiry Alerts"
-              >
-                <Bell className="w-4 h-4" />
-                {unreadNotificationsCount > 0 && (
-                  <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-600 text-[9px] font-bold text-white">
-                    {unreadNotificationsCount}
-                  </span>
-                )}
-              </button>
-            )}
-
-
-
-            {/* Account Switcher / User Button */}
+          {/* Subscription Tier & Quota Indicator */}
+          {currentUser && (
             <button
-              onClick={onOpenAuthModal}
-              className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-medium cursor-pointer transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] hover:shadow-lg hover:shadow-slate-500/10"
-              title="Switch user account or register test user"
+              onClick={onOpenPlanModal}
+              className={`flex items-center space-x-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors cursor-pointer ${
+                isPlanModalOpen
+                  ? 'bg-red-950/40 border-red-600/70 text-white shadow-sm'
+                  : isPlanActive
+                  ? 'bg-slate-900 border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800'
+                  : 'bg-amber-950/40 border-amber-800/60 text-amber-300 hover:bg-amber-900/40'
+              }`}
+              title="Click to view subscription plan details and limits"
             >
-              <User className="w-3.5 h-3.5 text-slate-400" />
-              <span className="max-w-[100px] truncate hidden sm:inline">
-                {currentUser?.email || 'Account'}
+              {isPlanActive ? (
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              ) : (
+                <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              )}
+              <span className="capitalize">
+                {isPlanActive
+                  ? `${currentUser.subscription_tier} Plan`
+                  : 'Plans'}
               </span>
             </button>
-          </div>
+          )}
+
+          {/* Broadcast Status Indicator */}
+          {isPlanActive && (
+            <div
+              className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${
+                activeStreamsCount > 0
+                  ? 'bg-emerald-950/30 border-emerald-800/50 text-emerald-300'
+                  : 'bg-slate-900 border-slate-800 text-slate-400'
+              }`}
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  activeStreamsCount > 0
+                    ? 'bg-emerald-400 animate-pulse'
+                    : 'bg-slate-500'
+                }`}
+              />
+              <span className="hidden sm:inline">
+                {activeStreamsCount > 0 ? `${activeStreamsCount} Live` : 'Standby'}
+              </span>
+            </div>
+          )}
+
+          {/* Primary Action Button (Create Stream) */}
+          {isPlanActive ? (
+            <button
+              onClick={onOpenCreateModal}
+              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold shadow-sm transition-colors cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+              <span className="hidden xs:inline">New Stream</span>
+            </button>
+          ) : (
+            <button
+              onClick={onOpenPlanModal}
+              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold shadow-sm transition-colors cursor-pointer"
+            >
+              <span>Activate Plan</span>
+            </button>
+          )}
+
+          {/* Tutorials & Documentation */}
+          {onOpenTutorials && (
+            <button
+              onClick={onOpenTutorials}
+              className="hidden sm:flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs font-medium transition-colors cursor-pointer"
+              title="Documentation & Guides"
+            >
+              <BookOpen className="w-3.5 h-3.5 text-slate-400" />
+              <span className="hidden md:inline">Docs</span>
+            </button>
+          )}
+
+          {/* Notifications Center */}
+          {onOpenNotificationsModal && (
+            <button
+              onClick={onOpenNotificationsModal}
+              className="relative p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-colors cursor-pointer"
+              title="Notifications"
+              aria-label="Notifications"
+            >
+              <Bell className="w-4 h-4" />
+              {unreadNotificationsCount > 0 && (
+                <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-600 text-[9px] font-bold text-white">
+                  {unreadNotificationsCount}
+                </span>
+              )}
+            </button>
+          )}
+
+          {/* User Account Button */}
+          <button
+            onClick={onOpenAuthModal}
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-xs font-medium transition-colors cursor-pointer"
+            title="User Account"
+          >
+            <User className="w-3.5 h-3.5 text-slate-400" />
+            <span className="max-w-[90px] sm:max-w-[120px] truncate hidden sm:inline">
+              {currentUser?.email ? currentUser.email.split('@')[0] : 'Account'}
+            </span>
+          </button>
         </div>
       </div>
     </header>

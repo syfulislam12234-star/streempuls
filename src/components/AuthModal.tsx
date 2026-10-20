@@ -86,41 +86,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  // Quick 1-click test helpers to speed up grading & verification
-  const handleQuickRegisterTest = async () => {
-    setIsLoading(true);
-    setErrorMsg(null);
-    try {
-      const testEmail = `tester_${Math.floor(Math.random() * 9000) + 1000}@streampulse.io`;
-      const user = await apiClient.registerUser({
-        email: testEmail,
-        full_name: 'Evaluation Tester',
-      });
-      onAuthSuccess(user);
-      onClose();
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Quick test registration failed');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleQuickLoginPro = async () => {
-    setIsLoading(true);
-    setErrorMsg(null);
-    try {
-      const user = await apiClient.loginUser({
-        email: 'pro@streampulse.io',
-      });
-      onAuthSuccess(user);
-      onClose();
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Quick login failed');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-4">
       <div className="w-full max-w-md rounded-3xl bg-slate-900 border border-slate-800 p-6 sm:p-7 space-y-5 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
@@ -182,12 +147,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             />
           </div>
 
-          {/* Passwordless Autonomous Token Security Badge */}
-          <div className="p-3 rounded-xl bg-slate-950 border border-emerald-500/30 flex items-center space-x-2.5 text-xs text-emerald-300">
-            <Zap className="w-4 h-4 text-emerald-400 shrink-0" />
+          {/* Secure Token Authentication Indicator */}
+          <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center space-x-2.5 text-xs text-slate-300">
+            <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
             <div className="leading-snug">
-              <span className="font-bold text-white block">Passwordless Autonomous Access</span>
-              <span className="text-[11px] text-slate-400">Zero manual passwords required &middot; Instant secure token authentication</span>
+              <span className="font-semibold text-white block">Secure Account Access</span>
+              <span className="text-[11px] text-slate-400">Authenticated session management with token verification</span>
             </div>
           </div>
 
@@ -235,12 +200,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             ) : mode === 'register' ? (
               <>
                 <UserPlus className="w-4 h-4" />
-                <span>Register Account &middot; Launch Studio</span>
+                <span>Create Account</span>
               </>
             ) : (
               <>
                 <LogIn className="w-4 h-4" />
-                <span>Sign In Autonomously</span>
+                <span>Sign In</span>
               </>
             )}
           </button>
@@ -258,36 +223,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           >
             {mode === 'register'
               ? 'Already have an account? Sign In'
-              : 'Need a new test account? Register (Defaults to Unpaid)'}
+              : "Don't have an account? Create one"}
           </button>
-        </div>
-
-        {/* 1-Click Verification Test Buttons */}
-        <div className="pt-3 border-t border-slate-800/80 space-y-2">
-          <span className="text-[10px] uppercase font-bold text-slate-500 block">
-            Verification Shortcuts:
-          </span>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={handleQuickRegisterTest}
-              disabled={isLoading}
-              className="p-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[11px] text-amber-300 font-medium text-left transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] hover:shadow-md hover:shadow-amber-500/10 cursor-pointer"
-            >
-              <div className="font-bold">1-Click Test Register</div>
-              <div className="text-[10px] text-slate-400">Creates unpaid account &amp; locks studio</div>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleQuickLoginPro}
-              disabled={isLoading}
-              className="p-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-[11px] text-emerald-400 font-medium text-left transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] hover:shadow-md hover:shadow-emerald-500/10 cursor-pointer"
-            >
-              <div className="font-bold">1-Click Active Pro</div>
-              <div className="text-[10px] text-slate-400">Logs in with unlocked Pro plan</div>
-            </button>
-          </div>
         </div>
       </div>
 

@@ -199,20 +199,6 @@ export const AdminDashboardPortal: React.FC<AdminDashboardPortalProps> = ({
     }
   };
 
-  const handleUnlockDefaultSecret = async () => {
-    setIsVerifying(true);
-    setAuthError(null);
-    try {
-      await apiClient.verifyAdminSecret('streampulse_admin_vault_secret_9941');
-      setIsAuthenticated(true);
-      loadAllAdminData();
-    } catch (err: any) {
-      setAuthError(err.message || 'Unlock failed');
-    } finally {
-      setIsVerifying(false);
-    }
-  };
-
   const handleLockAdminPortal = () => {
     apiClient.clearStoredAdminSecret();
     setIsAuthenticated(false);
@@ -381,16 +367,6 @@ export const AdminDashboardPortal: React.FC<AdminDashboardPortalProps> = ({
               <Unlock className="w-4 h-4" />
               <span>{isVerifying ? 'Authenticating...' : 'Authenticate & Open Admin Dashboard'}</span>
             </button>
-
-            {/* Quick 1-Click Unlock for Dev/VPS Testing */}
-            <button
-              type="button"
-              onClick={handleUnlockDefaultSecret}
-              disabled={isVerifying}
-              className="w-full py-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 text-xs font-semibold cursor-pointer transition-all hover:scale-[1.01]"
-            >
-              ⚡ 1-Click Unlock with VPS Default Secret Key
-            </button>
           </form>
 
           <div className="pt-3 border-t border-slate-800/80 text-center">
@@ -427,7 +403,7 @@ export const AdminDashboardPortal: React.FC<AdminDashboardPortalProps> = ({
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-400 hidden sm:block">
-                    Unified VPS Reverse Proxy &bull; Zero-Admin Operational Control
+                    Unified VPS Reverse Proxy &bull; Centralized Infrastructure Management
                   </p>
                 </div>
               </div>
@@ -647,8 +623,8 @@ export const AdminDashboardPortal: React.FC<AdminDashboardPortalProps> = ({
                   Update bKash, Nagad, Rocket numbers, and official WhatsApp support. Updates apply in real-time across all user checkout modals without server restarts.
                 </p>
               </div>
-              <span className="text-[11px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-3 py-1 rounded-full self-start sm:self-auto font-bold">
-                Real-Time Hot Sync Active
+              <span className="text-[11px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-3 py-1 rounded-full self-start sm:self-auto font-medium">
+                Real-Time Sync Active
               </span>
             </div>
 

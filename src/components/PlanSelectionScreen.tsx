@@ -15,7 +15,6 @@ import {
   Clock,
   CheckCircle2,
   Loader2,
-  Database,
   UserPlus,
   RefreshCw,
   LogOut,
@@ -77,11 +76,6 @@ export const PlanSelectionScreen: React.FC<PlanSelectionScreenProps> = ({
     }
   };
 
-  // Database verification modal state
-  const [showDbVerification, setShowDbVerification] = useState(false);
-  const [dbUsers, setDbUsers] = useState<UserProfile[]>([]);
-  const [isLoadingUsers, setIsLoadingUsers] = useState(false);
-
   // Live countdown ticker state (1-second interval)
   const [now, setNow] = useState<number>(Date.now());
   React.useEffect(() => {
@@ -129,19 +123,6 @@ export const PlanSelectionScreen: React.FC<PlanSelectionScreenProps> = ({
       setErrorMsg(err.message || 'Payment processing failed. Please try again.');
     } finally {
       setIsProcessing(false);
-    }
-  };
-
-  // 4. Fetch Database User Table to verify unpaid/pending status
-  const handleInspectDbUsers = async () => {
-    setShowDbVerification(true);
-    setIsLoadingUsers(true);
-    try {
-      const users = await apiClient.getUsers();
-      setDbUsers(users);
-    } catch (e) {
-    } finally {
-      setIsLoadingUsers(false);
     }
   };
 
@@ -215,18 +196,10 @@ export const PlanSelectionScreen: React.FC<PlanSelectionScreenProps> = ({
               <span>Return to Studio</span>
             </button>
           )}
-          <div className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-slate-900 border border-emerald-500/30 text-xs text-emerald-400 font-semibold shadow-sm">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Autonomous Engine: 100% Active</span>
+          <div className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-300 font-medium">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            <span>Instant Gateway Verification</span>
           </div>
-          <button
-            onClick={handleInspectDbUsers}
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-xs text-slate-300 border border-slate-700 transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] hover:shadow-lg hover:shadow-blue-500/10 cursor-pointer"
-            title="Inspect Database User Table to verify default unpaid status"
-          >
-            <Database className="w-3.5 h-3.5 text-blue-400" />
-            <span>Verify Database</span>
-          </button>
           <button
             onClick={onLogout}
             className="flex items-center space-x-1 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-red-950/60 text-xs text-slate-400 hover:text-red-300 border border-slate-800 transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] hover:shadow-md cursor-pointer"
@@ -304,17 +277,13 @@ export const PlanSelectionScreen: React.FC<PlanSelectionScreenProps> = ({
         </div>
       )}
 
-      {/* Hero Header */}
-      <div className="text-center max-w-3xl mx-auto space-y-3 mb-10">
-        <div className="inline-flex items-center space-x-2 px-3.5 py-1.5 rounded-full bg-red-500/10 border border-red-500/20 text-red-400 text-xs font-semibold">
-          <Sparkles className="w-4 h-4" />
-          <span>Simple, Transparent 24/7 Broadcasting Tiers</span>
-        </div>
-        <h2 className="text-2xl sm:text-4xl font-extrabold text-white tracking-tight">
-          Select Your Live Streaming Plan
+      {/* Plans Header */}
+      <div className="text-center max-w-3xl mx-auto space-y-2 mb-10">
+        <h2 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
+          Subscription Plans &amp; Quotas
         </h2>
-        <p className="text-sm text-slate-300">
-          Choose a plan that fits your broadcasting goals. Activate in one click to unlock immediate access to isolated FFmpeg streaming workers.
+        <p className="text-sm text-slate-400">
+          Select a subscription tier to configure your live broadcast channels, video storage, and streaming hours.
         </p>
       </div>
 
@@ -405,9 +374,9 @@ export const PlanSelectionScreen: React.FC<PlanSelectionScreenProps> = ({
                 <Zap className="w-4 h-4 text-amber-400 shrink-0" />
                 <span><strong>Non-stop streaming</strong> (24/7 continuous)</span>
               </div>
-              <div className="flex items-center space-x-2 text-emerald-400 font-semibold">
+              <div className="flex items-center space-x-2 text-emerald-400 font-medium">
                 <CheckCircle2 className="w-4 h-4 shrink-0" />
-                <span>100% Brand-Free</span>
+                <span>Brand-Free (No Watermark)</span>
               </div>
             </div>
           </div>
@@ -461,9 +430,9 @@ export const PlanSelectionScreen: React.FC<PlanSelectionScreenProps> = ({
                 <Zap className="w-4 h-4 text-amber-400 shrink-0" />
                 <span><strong>Non-stop streaming</strong> (24/7 continuous)</span>
               </div>
-              <div className="flex items-center space-x-2 text-emerald-400 font-semibold">
+              <div className="flex items-center space-x-2 text-emerald-400 font-medium">
                 <CheckCircle2 className="w-4 h-4 shrink-0" />
-                <span>100% Brand-Free</span>
+                <span>Brand-Free (No Watermark)</span>
               </div>
             </div>
           </div>
@@ -513,9 +482,9 @@ export const PlanSelectionScreen: React.FC<PlanSelectionScreenProps> = ({
                 <Zap className="w-4 h-4 text-amber-400 shrink-0" />
                 <span><strong>Non-stop streaming</strong> (24/7 continuous)</span>
               </div>
-              <div className="flex items-center space-x-2 text-emerald-400 font-semibold">
+              <div className="flex items-center space-x-2 text-emerald-400 font-medium">
                 <CheckCircle2 className="w-4 h-4 shrink-0" />
-                <span>100% Brand-Free</span>
+                <span>Brand-Free (No Watermark)</span>
               </div>
             </div>
           </div>
@@ -558,97 +527,6 @@ export const PlanSelectionScreen: React.FC<PlanSelectionScreenProps> = ({
         initialTab={localInitialTab}
         initialSectionId={localInitialSection}
       />
-
-      {/* ==================================================================== */}
-      {/* Database Verification Modal (Inspect User Table Defaults) */}
-      {/* ==================================================================== */}
-      {showDbVerification && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-4">
-          <div className="w-full max-w-2xl rounded-3xl bg-slate-900 border border-slate-800 p-6 space-y-4 shadow-2xl max-h-[85vh] flex flex-col">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center space-x-2.5">
-                <Database className="w-5 h-5 text-blue-400" />
-                <div>
-                  <h3 className="text-base font-bold text-white">Database User Table Inspection</h3>
-                  <p className="text-xs text-slate-400">Verifying subscription_status defaults to unpaid/pending upon registration</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowDbVerification(false)}
-                className="text-slate-400 hover:text-white text-sm"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto space-y-3">
-              {isLoadingUsers ? (
-                <div className="p-8 text-center">
-                  <Loader2 className="w-6 h-6 animate-spin text-blue-400 mx-auto" />
-                  <p className="text-xs text-slate-400 mt-2">Querying database users...</p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <div className="text-xs text-slate-300 font-semibold px-1">
-                    Found {dbUsers.length} user record(s) in database:
-                  </div>
-                  {dbUsers.map((u) => (
-                    <div
-                      key={u.id}
-                      className={`p-3.5 rounded-2xl border flex items-center justify-between text-xs ${
-                        u.id === currentUser.id
-                          ? 'bg-blue-950/30 border-blue-500/50'
-                          : 'bg-slate-950 border-slate-800'
-                      }`}
-                    >
-                      <div>
-                        <div className="flex items-center space-x-2">
-                          <span className="font-bold text-white">{u.email}</span>
-                          {u.id === currentUser.id && (
-                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-blue-500/20 text-blue-300">
-                              Current User
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-[11px] text-slate-400 mt-0.5">
-                          Tier: <strong className="text-slate-300 uppercase">{u.subscription_tier}</strong> &middot; Channels: {u.channel_limit} &middot; Videos: {u.video_limit}
-                        </div>
-                      </div>
-
-                      <div className="text-right">
-                        <span
-                          className={`inline-block px-2.5 py-1 rounded-full text-[11px] font-mono font-bold uppercase ${
-                            u.subscription_status === 'active'
-                              ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                              : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                          }`}
-                        >
-                          {u.subscription_status}
-                        </span>
-                        <p className="text-[10px] text-slate-500 mt-0.5">
-                          {u.subscription_status === 'active' ? 'Studio Unlocked' : 'Locked by Plan Guard'}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="pt-2 border-t border-slate-800 flex justify-between items-center text-xs">
-              <span className="text-slate-400">
-                Notice: New registrations default to <strong className="text-amber-300">unpaid</strong>.
-              </span>
-              <button
-                onClick={() => setShowDbVerification(false)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold cursor-pointer transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] hover:shadow-md"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

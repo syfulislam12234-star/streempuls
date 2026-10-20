@@ -380,21 +380,21 @@ export const LegalTermsModal: React.FC<LegalTermsModalProps> = ({
                         <td className="p-3">1 Channel live broadcast</td>
                         <td className="p-3">1 Video stored loop</td>
                         <td className="p-3">30 Days (24/7 continuous)</td>
-                        <td className="p-3 text-emerald-400 font-medium">100% Brand-Free</td>
+                        <td className="p-3 text-emerald-400 font-medium">Brand-Free (No Watermarks)</td>
                       </tr>
                       <tr>
                         <td className="p-3 font-semibold text-red-400">Pro Tier (4,000 BDT / ~$12)</td>
                         <td className="p-3">2 Channels concurrent streams</td>
                         <td className="p-3">2 Videos stored loops</td>
                         <td className="p-3">30 Days (24/7 continuous)</td>
-                        <td className="p-3 text-emerald-400 font-medium">100% Brand-Free</td>
+                        <td className="p-3 text-emerald-400 font-medium">Brand-Free (No Watermarks)</td>
                       </tr>
                       <tr>
                         <td className="p-3 font-semibold text-purple-400">Business Tier (12,000 BDT / ~$30)</td>
                         <td className="p-3">4 Channels concurrent live</td>
                         <td className="p-3">4 Videos stored loops</td>
                         <td className="p-3">30 Days (24/7 continuous)</td>
-                        <td className="p-3 text-emerald-400 font-medium">100% Brand-Free</td>
+                        <td className="p-3 text-emerald-400 font-medium">Brand-Free (No Watermarks)</td>
                       </tr>
                     </tbody>
                   </table>

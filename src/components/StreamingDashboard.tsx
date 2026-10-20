@@ -106,7 +106,6 @@ interface StreamingDashboardProps {
   onOpenPlanModal?: () => void;
   onOpenTutorials?: () => void;
   onOpenNotificationsModal?: () => void;
-  onSimulateUnpaid?: () => void;
 }
 
 export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
@@ -117,7 +116,6 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
   onOpenPlanModal,
   onOpenTutorials,
   onOpenNotificationsModal,
-  onSimulateUnpaid,
 }) => {
   const [streams, setStreams] = useState<StreamRecord[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -226,138 +224,97 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
   const renderDashboard = () => (
     <div className="space-y-8">
       {/* ==================================================================== */}
-      {/* Welcoming "Go Live" Hero Banner */}
       {/* ==================================================================== */}
-      <section className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-slate-900 via-slate-900/95 to-red-950/30 border border-slate-800 p-6 sm:p-10 shadow-xl">
-        {/* Ambient subtle glow background */}
-        <div className="absolute top-0 right-0 -mr-20 -mt-20 w-80 h-80 rounded-full bg-red-600/10 blur-3xl pointer-events-none" />
-        <div className="absolute bottom-0 left-1/3 -mb-20 w-60 h-60 rounded-full bg-rose-600/5 blur-2xl pointer-events-none" />
-
-        <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-          <div className="max-w-2xl space-y-3">
-            <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-red-400 text-xs font-semibold">
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>Easy 24/7 Cloud Broadcasting</span>
-            </div>
-
-            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold text-white tracking-tight leading-tight">
-              Broadcast Live Non-Stop <br className="hidden sm:inline" />
-              <span className="bg-gradient-to-r from-white via-slate-100 to-red-300 bg-clip-text text-transparent">
-                Without Keeping Your Computer On
-              </span>
+      {/* Cloud Studio Workspace Header                                         */}
+      {/* ==================================================================== */}
+      <section className="rounded-2xl bg-slate-900 border border-slate-800 p-6 sm:p-8 shadow-sm">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+          <div className="space-y-2 max-w-2xl">
+            <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
+              Live Broadcasting Studio
             </h1>
-
-            <p className="text-sm sm:text-base text-slate-300 leading-relaxed">
-              StreamPulse plays your video on YouTube and custom RTMP destinations around the clock. Choose a video loop, enter your stream key, and go live in seconds.
+            <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
+              Manage 24/7 continuous stream pipelines, multi-destination RTMP endpoints, and real-time broadcast telemetry with cloud-hosted direct stream encoding.
             </p>
-
-            {/* Quick Benefits in Plain English */}
-            <div className="pt-2 flex flex-wrap items-center gap-3 text-xs text-slate-300">
-              <div className="flex items-center space-x-1.5 bg-slate-950/60 px-3 py-1.5 rounded-xl border border-slate-800">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                <span>Runs 24/7 in the cloud</span>
+            <div className="pt-1 flex flex-wrap items-center gap-4 text-xs text-slate-400">
+              <div className="flex items-center space-x-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>Direct stream copy (-c:v copy)</span>
               </div>
-              <div className="flex items-center space-x-1.5 bg-slate-950/60 px-3 py-1.5 rounded-xl border border-slate-800">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                <span>Zero load on your device</span>
-              </div>
-              <div className="flex items-center space-x-1.5 bg-slate-950/60 px-3 py-1.5 rounded-xl border border-slate-800">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <div className="flex items-center space-x-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                 <span>Automatic continuous loop</span>
+              </div>
+              <div className="flex items-center space-x-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>Multi-destination RTMP</span>
               </div>
             </div>
           </div>
 
-          {/* Prominent "Create Live Stream" Hero Button */}
-          <div className="flex flex-col sm:flex-row lg:flex-col items-start lg:items-end justify-center gap-3 shrink-0">
+          <div className="shrink-0">
             <button
               onClick={() => {
                 setEditingStream(null);
                 setIsCreateModalOpen(true);
               }}
-              className="w-full sm:w-auto flex items-center justify-center space-x-3 px-8 py-4 rounded-2xl bg-gradient-to-r from-red-600 via-rose-600 to-red-600 hover:from-red-500 hover:to-rose-500 text-white font-extrabold text-base shadow-xl shadow-red-950/70 hover:shadow-2xl hover:shadow-red-500/25 transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
+              className="w-full sm:w-auto flex items-center justify-center space-x-2 px-5 py-3 rounded-xl bg-red-600 hover:bg-red-500 text-white font-semibold text-xs sm:text-sm transition-colors cursor-pointer shadow-sm"
             >
-              <Plus className="w-5 h-5 stroke-[2.5]" />
-              <span>Create Live Stream</span>
+              <Plus className="w-4 h-4 stroke-[2.5]" />
+              <span>Create Stream</span>
             </button>
-
-            <span className="text-[11px] text-slate-400 text-center sm:text-left lg:text-right">
-              Setup takes less than 1 minute &middot; 3 simple steps
-            </span>
           </div>
         </div>
       </section>
 
       {/* ==================================================================== */}
-      {/* ZERO-ADMIN AUTONOMOUS ENGINE TELEMETRY CARD                          */}
+      {/* Studio Metrics & Infrastructure Health Overview                       */}
       {/* ==================================================================== */}
-      <div className="p-5 sm:p-6 rounded-3xl bg-gradient-to-r from-slate-900 via-slate-900/90 to-slate-950 border border-slate-800 shadow-xl space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800/80">
-          <div className="flex items-center space-x-3.5">
-            <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
-              <Zap className="w-5 h-5 text-emerald-400" />
-            </div>
-            <div>
-              <div className="flex items-center space-x-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
-                  Zero-Admin Control System
-                </span>
-                <span className="flex h-2 w-2 relative">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                </span>
-                <span className="text-[10px] font-mono text-emerald-300 font-semibold px-2 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-500/30">
-                  Autonomous 100%
-                </span>
-              </div>
-              <p className="text-xs text-slate-300 font-medium">
-                Self-driving cloud infrastructure &middot; Automated database auto-sync &middot; Zero manual oversight
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center space-x-2 text-xs">
-            <span className="text-slate-400">MFS Gateway Security:</span>
-            <span className="px-2.5 py-1 rounded-xl bg-slate-950 border border-emerald-500/30 text-emerald-300 font-mono text-[11px] font-bold">
-              bKash &middot; Nagad &middot; Rocket (Tokens Secured)
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+          <div className="text-[11px] font-medium text-slate-400">Active Broadcasts</div>
+          <div className="text-lg font-bold text-white font-mono flex items-center space-x-2">
+            <span>{liveStreams.length}</span>
+            <span className="text-xs font-normal text-slate-500">
+              / {currentUser?.channel_limit || 2} Channels
             </span>
+          </div>
+          <div className="text-[11px] text-emerald-400 flex items-center space-x-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            <span>Broadcast Engine Active</span>
           </div>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-          <div className="p-3.5 rounded-2xl bg-slate-950/80 border border-slate-800/80 space-y-1">
-            <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Database Sync</div>
-            <div className="text-sm font-bold text-white flex items-center space-x-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              <span>Supabase Auto-Sync</span>
-            </div>
-            <div className="text-[11px] text-emerald-400 font-mono">PostgreSQL 15+ RLS Active</div>
+        <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+          <div className="text-[11px] font-medium text-slate-400">Total Configured</div>
+          <div className="text-lg font-bold text-white font-mono">
+            {streams.length}
           </div>
-
-          <div className="p-3.5 rounded-2xl bg-slate-950/80 border border-slate-800/80 space-y-1">
-            <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Payment Verification</div>
-            <div className="text-sm font-bold text-white flex items-center space-x-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              <span>Autonomous Engine</span>
-            </div>
-            <div className="text-[11px] text-slate-400">Zero human intervention</div>
+          <div className="text-[11px] text-slate-400">
+            {readyStreams.length} Standby / Scheduled
           </div>
+        </div>
 
-          <div className="p-3.5 rounded-2xl bg-slate-950/80 border border-slate-800/80 space-y-1">
-            <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Fleet Workers</div>
-            <div className="text-sm font-bold text-white flex items-center space-x-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              <span>FFmpeg Worker Nodes</span>
-            </div>
-            <div className="text-[11px] text-slate-400">Isolated 10x concurrency</div>
+        <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+          <div className="text-[11px] font-medium text-slate-400">Subscription Tier</div>
+          <div className="text-lg font-bold text-white capitalize">
+            {currentUser?.subscription_tier || 'Free'}
           </div>
+          <div className="text-[11px] text-slate-400">
+            {currentUser?.hour_limit && currentUser.hour_limit > 0
+              ? `${currentUser.hour_limit} Hours Quota`
+              : 'Continuous Unmetered'}
+          </div>
+        </div>
 
-          <div className="p-3.5 rounded-2xl bg-slate-950/80 border border-slate-800/80 space-y-1">
-            <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Active Community</div>
-            <div className="text-sm font-bold text-white flex items-center space-x-1.5">
-              <Users className="w-3.5 h-3.5 text-blue-400" />
-              <span>13,890+ Streamers</span>
-            </div>
-            <div className="text-[11px] text-emerald-400 font-mono">3,420 Active Broadcasting</div>
+        <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
+          <div className="text-[11px] font-medium text-slate-400">Platform Health</div>
+          <div className="text-lg font-bold text-emerald-400 flex items-center space-x-1.5">
+            <span className="w-2 h-2 rounded-full bg-emerald-400" />
+            <span>Operational</span>
+          </div>
+          <div className="text-[11px] text-slate-400">
+            Direct Copy Streaming
           </div>
         </div>
       </div>
@@ -408,11 +365,11 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
                 </span>
                 {currentUser.is_brand_free ? (
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
-                    100% Brand-Free
+                    Brand-Free
                   </span>
                 ) : (
                   <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-950/80 text-amber-300 border border-amber-800/60">
-                    Watermarked (Free Trial)
+                    Watermarked (Trial)
                   </span>
                 )}
               </div>
@@ -463,16 +420,6 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
               >
                 <Zap className="w-3.5 h-3.5 text-amber-400" />
                 <span>Change Plan</span>
-              </button>
-            )}
-            {onSimulateUnpaid && (
-              <button
-                onClick={onSimulateUnpaid}
-                className="px-3 py-2 rounded-xl bg-amber-950/30 hover:bg-amber-950/60 border border-amber-800/40 text-amber-300 hover:text-amber-200 text-xs font-medium transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
-                title="Simulate unpaid status to test the post-login plan guard"
-              >
-                <Lock className="w-3.5 h-3.5 inline mr-1" />
-                <span>Simulate Unpaid (Test Guard)</span>
               </button>
             )}
           </div>

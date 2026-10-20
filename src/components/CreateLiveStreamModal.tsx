@@ -1164,14 +1164,14 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
                 </p>
 
                 {currentUser?.subscription_tier === 'free' || currentUser?.has_watermark ? (
-                  <div className="p-2.5 rounded-xl bg-amber-950/40 border border-amber-800/40 text-[11px] text-amber-300 flex items-center space-x-2">
+                  <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-[11px] text-slate-300 flex items-center space-x-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
-                    <span>Free Plan: &ldquo;⚡ Power of StreamPulse (https://streampulse.io)&rdquo; will be appended to description. Upgrade to Basic/Pro/Business for 100% Brand-Free streams.</span>
+                    <span>Free Plan: Standard stream footer will be appended. Upgrade to a paid tier for watermark-free broadcasts.</span>
                   </div>
                 ) : (
-                  <div className="p-2.5 rounded-xl bg-emerald-950/40 border border-emerald-800/40 text-[11px] text-emerald-300 flex items-center space-x-2">
+                  <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-[11px] text-slate-300 flex items-center space-x-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
-                    <span>{currentUser?.subscription_tier?.toUpperCase() || 'PAID'} Plan: 100% Brand-Free &middot; Zero watermarks or forced app links.</span>
+                    <span>{currentUser?.subscription_tier?.toUpperCase() || 'PAID'} Plan: Clean broadcast &middot; No watermarks or promotional footers.</span>
                   </div>
                 )}
               </div>

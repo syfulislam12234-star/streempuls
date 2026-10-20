@@ -5,20 +5,17 @@ import {
   Zap,
   Lock,
   User,
-  ShieldCheck,
-  CreditCard,
   LogOut,
   ChevronLeft,
   ChevronRight,
-  Menu,
   X,
   Bell,
   BookOpen,
   Settings,
-  Activity,
-  Layers,
-  ExternalLink,
   Mail,
+  ShieldCheck,
+  CreditCard,
+  Layers,
 } from 'lucide-react';
 import { UserProfile } from '../services/apiClient';
 import logoImg from '../assets/images/streampulse_logo_1791782499836.jpg';
@@ -32,14 +29,17 @@ export interface SidebarProps {
   onToggleCollapse: () => void;
   isMobileOpen: boolean;
   onCloseMobile: () => void;
-  onOpenMobile: () => void;
+  onOpenMobile?: () => void;
   onNavigateStudio: () => void;
+  onNavigateAdmin?: () => void;
+  isPlanModalOpen?: boolean;
   onOpenCreateModal: () => void;
   onOpenPlanModal: () => void;
   onOpenAuthModal: () => void;
   onOpenTutorials?: () => void;
   onOpenNotificationsModal?: () => void;
   onOpenGmail?: () => void;
+  onOpenArchitecture?: () => void;
   onOpenLegal?: (tab?: 'terms' | 'privacy', sectionId?: string) => void;
   onLogout: () => void;
 }
@@ -53,14 +53,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onToggleCollapse,
   isMobileOpen,
   onCloseMobile,
-  onOpenMobile,
   onNavigateStudio,
+  onNavigateAdmin,
+  isPlanModalOpen = false,
   onOpenCreateModal,
   onOpenPlanModal,
   onOpenAuthModal,
   onOpenTutorials,
   onOpenNotificationsModal,
   onOpenGmail,
+  onOpenArchitecture,
   onOpenLegal,
   onLogout,
 }) => {
@@ -72,25 +74,36 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: 'Live Studio',
       icon: Radio,
       badge: activeStreamsCount > 0 ? `${activeStreamsCount} Live` : undefined,
-      badgeColor: 'bg-emerald-950 text-emerald-400 border-emerald-500/30',
-      isActive: currentView === 'studio',
+      badgeColor: 'text-emerald-400 bg-emerald-950/60 border border-emerald-500/20',
+      isActive: currentView === 'studio' && !isPlanModalOpen,
       onClick: () => {
         onNavigateStudio();
         onCloseMobile();
       },
     },
+    ...(onNavigateAdmin
+      ? [
+          {
+            id: 'admin',
+            label: 'Admin Portal',
+            icon: ShieldCheck,
+            isActive: currentView === 'admin' && !isPlanModalOpen,
+            onClick: () => {
+              onNavigateAdmin();
+              onCloseMobile();
+            },
+          },
+        ]
+      : []),
     {
       id: 'plans',
-      label: 'Plans & Pricing',
-      icon: Zap,
-      badge: currentUser?.subscription_tier ? currentUser.subscription_tier.toUpperCase() : undefined,
-      badgeColor:
-        currentUser?.subscription_tier === 'pro'
-          ? 'bg-red-950 text-red-400 border-red-500/30'
-          : currentUser?.subscription_tier === 'business'
-          ? 'bg-purple-950 text-purple-400 border-purple-500/30'
-          : 'bg-slate-800 text-slate-300 border-slate-700',
-      isActive: false,
+      label: 'Plans & Billing',
+      icon: CreditCard,
+      badge: currentUser?.subscription_tier
+        ? currentUser.subscription_tier.toUpperCase()
+        : undefined,
+      badgeColor: 'text-slate-300 bg-slate-800 border border-slate-700',
+      isActive: isPlanModalOpen,
       onClick: () => {
         onOpenPlanModal();
         onCloseMobile();
@@ -98,19 +111,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
     },
     {
       id: 'gmail',
-      label: 'Gmail & Email Alerts',
+      label: 'Email Alerts',
       icon: Mail,
-      badge: 'Google',
-      badgeColor: 'bg-red-950 text-red-400 border-red-500/30',
       isActive: false,
       onClick: () => {
         if (onOpenGmail) onOpenGmail();
         onCloseMobile();
       },
     },
+    ...(onOpenArchitecture
+      ? [
+          {
+            id: 'architecture',
+            label: 'System Blueprint',
+            icon: Layers,
+            isActive: false,
+            onClick: () => {
+              onOpenArchitecture();
+              onCloseMobile();
+            },
+          },
+        ]
+      : []),
     {
       id: 'tutorials',
-      label: 'Tutorials & Guides',
+      label: 'Documentation',
       icon: BookOpen,
       isActive: false,
       onClick: () => {
@@ -122,8 +147,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'notifications',
       label: 'Notifications',
       icon: Bell,
-      badge: unreadNotificationsCount > 0 ? `${unreadNotificationsCount}` : undefined,
-      badgeColor: 'bg-red-600 text-white font-bold',
+      badge:
+        unreadNotificationsCount > 0 ? String(unreadNotificationsCount) : undefined,
+      badgeColor: 'text-white bg-red-600 font-bold',
       isActive: false,
       onClick: () => {
         if (onOpenNotificationsModal) onOpenNotificationsModal();
@@ -144,64 +170,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <>
-      {/* ==================================================================== */}
-      {/* MOBILE TOP BAR (Visible on < lg screens) */}
-      {/* ==================================================================== */}
-      <div className="lg:hidden fixed top-0 left-0 right-0 h-16 bg-slate-950/95 backdrop-blur-md border-b border-slate-800/80 z-40 px-4 flex items-center justify-between">
-        <div className="flex items-center space-x-3">
-          <button
-            onClick={onOpenMobile}
-            className="p-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
-            aria-label="Open Navigation Sidebar"
-          >
-            <Menu className="w-5 h-5" />
-          </button>
-
-          <div className="flex items-center space-x-2.5">
-            <div className="w-8 h-8 rounded-lg overflow-hidden bg-slate-900 border border-red-500/40 relative shrink-0">
-              <img src={logoImg} alt="StreamPulse" className="w-full h-full object-contain p-0.5" />
-              {activeStreamsCount > 0 && (
-                <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
-                </span>
-              )}
-            </div>
-            <div>
-              <div className="flex items-center space-x-1.5">
-                <span className="font-extrabold text-sm tracking-tight text-white">StreamPulse</span>
-                <span className="text-[10px] font-bold px-1.5 py-0.2 rounded-full bg-red-950 text-red-400 border border-red-800/50">
-                  Studio
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center space-x-2">
-          {isPlanActive && (
-            <button
-              onClick={onOpenCreateModal}
-              className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 text-white text-xs font-bold shadow-md shadow-red-950/60 flex items-center space-x-1"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span className="text-xs">Live</span>
-            </button>
-          )}
-
-          <button
-            onClick={onOpenAuthModal}
-            className="p-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white"
-            title="Account"
-          >
-            <User className="w-4 h-4 text-slate-400" />
-          </button>
-        </div>
-      </div>
-
-      {/* ==================================================================== */}
-      {/* MOBILE BACKDROP OVERLAY */}
-      {/* ==================================================================== */}
+      {/* Mobile Backdrop Overlay */}
       {isMobileOpen && (
         <div
           onClick={onCloseMobile}
@@ -210,47 +179,52 @@ export const Sidebar: React.FC<SidebarProps> = ({
         />
       )}
 
-      {/* ==================================================================== */}
-      {/* VERTICAL SIDEBAR (Desktop Fixed & Mobile Drawer) */}
-      {/* ==================================================================== */}
+      {/* Main Collapsible Sidebar & Mobile Slide-Over */}
       <aside
         className={`fixed top-0 bottom-0 left-0 z-50 flex flex-col bg-slate-950 border-r border-slate-800/80 transition-all duration-300 ease-in-out ${
-          /* Mobile slide-in positioning */
-          isMobileOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'
-        } ${
-          /* Desktop width: Collapsed vs Expanded */
-          isCollapsed ? 'lg:w-20' : 'lg:w-64'
-        } w-72`}
+          isMobileOpen
+            ? 'translate-x-0 shadow-2xl'
+            : '-translate-x-full lg:translate-x-0'
+        } ${isCollapsed ? 'lg:w-20' : 'lg:w-64'} w-72`}
       >
-        {/* SIDEBAR HEADER / BRANDING */}
-        <div className="h-16 px-4 flex items-center justify-between border-b border-slate-800/80 shrink-0">
+        {/* Sidebar Header / Brand Logo & Toggle Controls */}
+        <div
+          className={`h-16 flex items-center justify-between border-b border-slate-800/80 shrink-0 transition-all ${
+            isCollapsed && !isMobileOpen ? 'px-2' : 'px-3.5'
+          }`}
+        >
+          {/* Logo & Brand Title */}
           <div
-            onClick={onNavigateStudio}
-            className="flex items-center space-x-3 cursor-pointer group overflow-hidden"
+            onClick={() => {
+              onNavigateStudio();
+              onCloseMobile();
+            }}
+            className="flex items-center space-x-2.5 cursor-pointer min-w-0 flex-1 mr-2 overflow-hidden select-none"
+            title="StreamPulse - Cloud Live Studio"
           >
-            <div className="relative flex items-center justify-center w-9 h-9 rounded-xl overflow-hidden bg-slate-900 border border-red-500/40 shadow-sm shrink-0 transition-transform group-hover:scale-105">
-              <img src={logoImg} alt="StreamPulse Logo" className="w-full h-full object-contain p-0.5" />
+            <div
+              className={`relative flex items-center justify-center rounded-lg overflow-hidden bg-slate-900 border border-slate-800 shrink-0 transition-all ${
+                isCollapsed && !isMobileOpen ? 'w-7 h-7' : 'w-8 h-8'
+              }`}
+            >
+              <img
+                src={logoImg}
+                alt="StreamPulse"
+                className="w-full h-full object-contain p-0.5"
+              />
               {activeStreamsCount > 0 && (
-                <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
-                </span>
+                <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-500 ring-1 ring-slate-950" />
               )}
             </div>
 
             {(!isCollapsed || isMobileOpen) && (
-              <div className="transition-opacity duration-200 min-w-0">
-                <div className="flex items-center space-x-1.5">
-                  <span className="font-extrabold text-base tracking-tight text-white group-hover:text-red-400 transition-colors truncate">
-                    StreamPulse
-                  </span>
-                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-950 text-red-400 border border-red-800/50 uppercase shrink-0">
-                    SaaS
-                  </span>
+              <div className="min-w-0 flex-1 truncate">
+                <div className="font-bold text-sm text-white tracking-tight leading-snug truncate">
+                  StreamPulse
                 </div>
-                <p className="text-[10px] text-slate-400 truncate">
-                  24/7 Live Broadcasting
-                </p>
+                <div className="text-[10px] text-slate-400 leading-none truncate mt-0.5">
+                  Cloud Live Studio
+                </div>
               </div>
             )}
           </div>
@@ -258,22 +232,29 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {/* Desktop Collapse / Expand Toggle Button */}
           <button
             onClick={onToggleCollapse}
-            className="hidden lg:flex p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
+            className="hidden lg:flex items-center justify-center w-7 h-7 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer shrink-0"
             title={isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
+            aria-label={isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
           >
-            {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+            {isCollapsed ? (
+              <ChevronRight className="w-3.5 h-3.5" />
+            ) : (
+              <ChevronLeft className="w-3.5 h-3.5" />
+            )}
           </button>
 
           {/* Mobile Close Button */}
           <button
             onClick={onCloseMobile}
-            className="lg:hidden p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white cursor-pointer"
+            className="lg:hidden flex items-center justify-center w-7 h-7 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer shrink-0"
+            aria-label="Close navigation"
+            title="Close navigation"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* GO LIVE QUICK ACTION BUTTON */}
+        {/* Primary Action Button (New Stream or Activate Plan) */}
         <div className="p-3 shrink-0">
           {isPlanActive ? (
             <button
@@ -281,13 +262,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 onOpenCreateModal();
                 onCloseMobile();
               }}
-              className={`w-full py-2.5 px-3 rounded-2xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold text-xs shadow-lg shadow-red-950/60 hover:shadow-red-900/80 transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] cursor-pointer flex items-center ${
-                isCollapsed && !isMobileOpen ? 'justify-center' : 'justify-center space-x-2'
+              className={`w-full py-2.5 px-3 rounded-xl bg-red-600 hover:bg-red-500 text-white font-semibold text-xs transition-colors cursor-pointer flex items-center shadow-sm ${
+                isCollapsed && !isMobileOpen
+                  ? 'justify-center'
+                  : 'justify-center space-x-2'
               }`}
               title="Create New Live Stream"
             >
-              <Plus className="w-4 h-4 shrink-0" />
-              {(!isCollapsed || isMobileOpen) && <span>Go Live</span>}
+              <Plus className="w-4 h-4 shrink-0 stroke-[2.5]" />
+              {(!isCollapsed || isMobileOpen) && <span>New Stream</span>}
             </button>
           ) : (
             <button
@@ -295,42 +278,42 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 onOpenPlanModal();
                 onCloseMobile();
               }}
-              className={`w-full py-2.5 px-3 rounded-2xl bg-amber-950/80 hover:bg-amber-900/80 border border-amber-600/40 text-amber-300 font-bold text-xs transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] cursor-pointer flex items-center ${
-                isCollapsed && !isMobileOpen ? 'justify-center' : 'justify-center space-x-2'
+              className={`w-full py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 font-medium text-xs transition-colors cursor-pointer flex items-center ${
+                isCollapsed && !isMobileOpen
+                  ? 'justify-center'
+                  : 'justify-center space-x-2'
               }`}
-              title="Unlock Studio Plan"
+              title="Select Subscription Plan"
             >
               <Lock className="w-4 h-4 shrink-0 text-amber-400" />
-              {(!isCollapsed || isMobileOpen) && <span>Unlock Studio</span>}
+              {(!isCollapsed || isMobileOpen) && <span>Activate Plan</span>}
             </button>
           )}
         </div>
 
-        {/* MAIN NAVIGATION ITEMS LIST */}
-        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5 scrollbar-thin scrollbar-thumb-slate-800">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 px-3 py-1">
-            {(!isCollapsed || isMobileOpen) ? 'Navigation' : '•••'}
-          </div>
-
+        {/* Navigation Items List */}
+        <nav className="flex-1 overflow-y-auto px-3 py-1 space-y-1 scrollbar-thin scrollbar-thumb-slate-800">
           {navItems.map((item) => {
             const Icon = item.icon;
             return (
               <button
                 key={item.id}
                 onClick={item.onClick}
-                className={`w-full flex items-center rounded-2xl py-2.5 px-3 text-xs font-semibold transition-all duration-200 cursor-pointer group ${
-                  isCollapsed && !isMobileOpen ? 'justify-center' : 'justify-between'
+                className={`w-full flex items-center rounded-xl py-2 px-3 text-xs font-medium transition-colors cursor-pointer ${
+                  isCollapsed && !isMobileOpen
+                    ? 'justify-center'
+                    : 'justify-between'
                 } ${
                   item.isActive
-                    ? 'bg-red-600/15 border border-red-500/40 text-red-300 shadow-sm shadow-red-950/30'
-                    : 'text-slate-300 hover:text-white hover:bg-slate-900/90 border border-transparent hover:border-slate-800'
+                    ? 'bg-slate-900 text-white border border-slate-800 shadow-sm'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-900/60 border border-transparent'
                 }`}
                 title={item.label}
               >
-                <div className="flex items-center space-x-3 min-w-0">
+                <div className="flex items-center space-x-2.5 min-w-0">
                   <Icon
-                    className={`w-4 h-4 shrink-0 transition-colors ${
-                      item.isActive ? 'text-red-400' : 'text-slate-400 group-hover:text-slate-200'
+                    className={`w-4 h-4 shrink-0 ${
+                      item.isActive ? 'text-red-400' : 'text-slate-400'
                     }`}
                   />
                   {(!isCollapsed || isMobileOpen) && (
@@ -340,8 +323,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
                 {(!isCollapsed || isMobileOpen) && item.badge && (
                   <span
-                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold border shrink-0 ${
-                      item.badgeColor || 'bg-slate-800 text-slate-300 border-slate-700'
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-medium shrink-0 ${
+                      item.badgeColor || 'bg-slate-800 text-slate-300'
                     }`}
                   >
                     {item.badge}
@@ -350,47 +333,27 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </button>
             );
           })}
+        </nav>
 
-          {/* SYSTEM TELEMETRY WIDGET (Collapsed vs Expanded) */}
-          {(!isCollapsed || isMobileOpen) && (
-            <div className="pt-4 pb-2">
-              <div className="p-3 rounded-2xl bg-slate-900/80 border border-slate-800/90 space-y-2">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span className="text-slate-400 font-medium">Broadcast Engine</span>
-                  <span className="flex items-center space-x-1 text-emerald-400 font-bold font-mono text-[10px]">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>ONLINE</span>
-                  </span>
-                </div>
+        {/* Operational Status Footnote */}
+        {(!isCollapsed || isMobileOpen) && (
+          <div className="px-4 py-2 border-t border-slate-900 flex items-center justify-between text-[11px] text-slate-400 shrink-0">
+            <span className="flex items-center space-x-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              <span>Platform Status</span>
+            </span>
+            <span className="text-slate-300 font-medium">Operational</span>
+          </div>
+        )}
 
-                <div className="flex items-center justify-between text-[11px] pt-1 border-t border-slate-800">
-                  <span className="text-slate-400">Active Streams</span>
-                  <span className="text-white font-mono font-bold">{activeStreamsCount}</span>
-                </div>
-
-                <div className="flex items-center justify-between text-[11px] pt-1 border-t border-slate-800">
-                  <span className="text-slate-400">Current Plan</span>
-                  <button
-                    onClick={() => {
-                      onOpenPlanModal();
-                      onCloseMobile();
-                    }}
-                    className="text-red-400 font-bold hover:underline cursor-pointer uppercase text-[10px]"
-                  >
-                    {currentUser?.subscription_tier || 'Free'} &rarr;
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* SIDEBAR FOOTER / USER PROFILE & LOGOUT */}
-        <div className="p-3 border-t border-slate-800/80 bg-slate-950/60 shrink-0 space-y-2">
+        {/* Sidebar Footer: User Profile & Legal Policies */}
+        <div className="p-3 border-t border-slate-800/80 bg-slate-950 shrink-0 space-y-2">
           {currentUser ? (
             <div
-              className={`flex items-center rounded-2xl p-2 bg-slate-900/60 border border-slate-800/80 ${
-                isCollapsed && !isMobileOpen ? 'justify-center' : 'justify-between'
+              className={`flex items-center rounded-xl p-2 bg-slate-900/60 border border-slate-800 ${
+                isCollapsed && !isMobileOpen
+                  ? 'justify-center'
+                  : 'justify-between'
               }`}
             >
               <div
@@ -398,15 +361,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   onOpenAuthModal();
                   onCloseMobile();
                 }}
-                className="flex items-center space-x-2.5 min-w-0 cursor-pointer group"
+                className="flex items-center space-x-2.5 min-w-0 cursor-pointer"
                 title="Account Settings"
               >
-                <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-red-600/20 to-rose-600/20 border border-red-500/30 flex items-center justify-center text-red-400 font-bold text-xs shrink-0 group-hover:border-red-500 transition-colors">
-                  {currentUser.email ? currentUser.email.charAt(0).toUpperCase() : 'U'}
+                <div className="w-7 h-7 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-300 font-bold text-xs shrink-0">
+                  {currentUser.email
+                    ? currentUser.email.charAt(0).toUpperCase()
+                    : 'U'}
                 </div>
                 {(!isCollapsed || isMobileOpen) && (
                   <div className="min-w-0">
-                    <div className="text-xs font-bold text-white group-hover:text-red-300 transition-colors truncate">
+                    <div className="text-xs font-semibold text-white truncate">
                       {currentUser.full_name || currentUser.email.split('@')[0]}
                     </div>
                     <div className="text-[10px] text-slate-400 truncate">
@@ -419,10 +384,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
               {(!isCollapsed || isMobileOpen) && (
                 <button
                   onClick={onLogout}
-                  className="p-1.5 rounded-xl hover:bg-red-950/60 text-slate-400 hover:text-red-400 transition-colors cursor-pointer shrink-0"
-                  title="Sign Out / Switch Account"
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
+                  title="Sign Out"
                 >
-                  <LogOut className="w-4 h-4" />
+                  <LogOut className="w-3.5 h-3.5" />
                 </button>
               )}
             </div>
@@ -432,8 +397,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 onOpenAuthModal();
                 onCloseMobile();
               }}
-              className={`w-full py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 text-xs font-semibold cursor-pointer flex items-center ${
-                isCollapsed && !isMobileOpen ? 'justify-center' : 'justify-center space-x-2'
+              className={`w-full py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 text-xs font-medium cursor-pointer flex items-center ${
+                isCollapsed && !isMobileOpen
+                  ? 'justify-center'
+                  : 'justify-center space-x-2'
               }`}
             >
               <User className="w-4 h-4 text-slate-400" />
@@ -441,37 +408,37 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </button>
           )}
 
-          {/* Legal micro-links */}
+          {/* Legal Links */}
           {(!isCollapsed || isMobileOpen) && onOpenLegal && (
-            <div className="flex items-center justify-center space-x-2 text-[10px] text-slate-400 pt-1">
+            <div className="flex items-center justify-center space-x-2 text-[10px] text-slate-500 pt-0.5">
               <button
                 onClick={() => {
                   onOpenLegal('terms');
                   onCloseMobile();
                 }}
-                className="hover:text-slate-300 underline cursor-pointer"
+                className="hover:text-slate-300 cursor-pointer"
               >
                 Terms
               </button>
-              <span>&bull;</span>
+              <span>&middot;</span>
               <button
                 onClick={() => {
                   onOpenLegal('privacy');
                   onCloseMobile();
                 }}
-                className="hover:text-slate-300 underline cursor-pointer"
+                className="hover:text-slate-300 cursor-pointer"
               >
                 Privacy
               </button>
-              <span>&bull;</span>
+              <span>&middot;</span>
               <button
                 onClick={() => {
                   onOpenLegal('terms', 'aup');
                   onCloseMobile();
                 }}
-                className="hover:text-amber-400 underline cursor-pointer"
+                className="hover:text-slate-300 cursor-pointer"
               >
-                AUP
+                Acceptable Use
               </button>
             </div>
           )}

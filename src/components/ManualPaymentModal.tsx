@@ -247,41 +247,37 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
             </div>
 
             <div className="space-y-2">
-              <div className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 text-xs font-bold">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                <span>Zero-Admin Autonomous Engine Verified</span>
-              </div>
-              <h4 className="text-xl sm:text-2xl font-black text-white tracking-tight">
+              <h4 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
                 {submittedPayment.status === 'approved' || activatedUser
-                  ? 'Plan Activated Autonomously!'
-                  : 'Payment Queued for Auto-Sync'}
+                  ? 'Plan Activated Successfully'
+                  : 'Payment Submitted for Verification'}
               </h4>
               <p className="text-xs sm:text-sm text-slate-300 max-w-md mx-auto leading-relaxed">
                 {submittedPayment.status === 'approved' || activatedUser ? (
                   <>
-                    Transaction verified instantly by the autonomous gateway engine. Your{' '}
-                    <strong className="text-white uppercase">{planTier} Plan</strong> quotas are unlocked and ready for 24/7 broadcasting.
+                    Transaction confirmed. Your{' '}
+                    <strong className="text-white uppercase">{planTier} Plan</strong> quotas and multi-destination streaming are now active.
                   </>
                 ) : (
                   <>
-                    Your payment for the <strong className="text-white uppercase">{planTier} Plan</strong> has been submitted. The autonomous engine is completing token validation.
+                    Your transaction details for the <strong className="text-white uppercase">{planTier} Plan</strong> have been recorded and are being verified.
                   </>
                 )}
               </p>
             </div>
 
-            {/* Autonomous Verification Status Banner */}
-            <div className="p-4 rounded-2xl bg-gradient-to-b from-emerald-950/40 to-slate-950 border border-emerald-500/30 text-center space-y-1.5 shadow-xl max-w-md mx-auto ring-1 ring-emerald-500/20">
+            {/* Verification Status Banner */}
+            <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-center space-y-1 max-w-md mx-auto">
               <div className="flex items-center justify-center space-x-2 text-emerald-400">
                 <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                <span className="text-xs font-bold uppercase tracking-wider">
+                <span className="text-xs font-semibold tracking-wide">
                   {submittedPayment.status === 'approved' || activatedUser
-                    ? '100% Autonomous Activation'
-                    : 'Auto-Verification in Progress'}
+                    ? 'Subscription Active'
+                    : 'Verification In Progress'}
                 </span>
               </div>
-              <div className="text-sm font-semibold text-slate-200">
-                Zero human oversight required &middot; 24/7 Cloud Studio ready
+              <div className="text-xs text-slate-400">
+                Studio quotas updated &middot; Ready for live broadcasting
               </div>
             </div>
 
@@ -310,8 +306,8 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                 <span className="text-slate-200 capitalize font-medium">{submittedPayment.payment_method}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-400">Verification Engine:</span>
-                <span className="text-emerald-400 font-semibold">Instant Autonomous Gateway</span>
+                <span className="text-slate-400">Verification:</span>
+                <span className="text-slate-200 font-medium">Automated Verification</span>
               </div>
             </div>
 
