@@ -13,9 +13,7 @@ import {
   BookOpen,
   Settings,
   Mail,
-  ShieldCheck,
   CreditCard,
-  Layers,
 } from 'lucide-react';
 import { UserProfile } from '../services/apiClient';
 import logoImg from '../assets/images/streampulse_logo_1791782499836.jpg';
@@ -24,14 +22,13 @@ export interface SidebarProps {
   currentUser: UserProfile | null;
   activeStreamsCount: number;
   unreadNotificationsCount?: number;
-  currentView: 'studio' | 'admin';
+  currentView?: 'studio';
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   isMobileOpen: boolean;
   onCloseMobile: () => void;
   onOpenMobile?: () => void;
   onNavigateStudio: () => void;
-  onNavigateAdmin?: () => void;
   isPlanModalOpen?: boolean;
   onOpenCreateModal: () => void;
   onOpenPlanModal: () => void;
@@ -39,7 +36,6 @@ export interface SidebarProps {
   onOpenTutorials?: () => void;
   onOpenNotificationsModal?: () => void;
   onOpenGmail?: () => void;
-  onOpenArchitecture?: () => void;
   onOpenLegal?: (tab?: 'terms' | 'privacy', sectionId?: string) => void;
   onLogout: () => void;
 }
@@ -48,13 +44,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   currentUser,
   activeStreamsCount,
   unreadNotificationsCount = 0,
-  currentView,
   isCollapsed,
   onToggleCollapse,
   isMobileOpen,
   onCloseMobile,
   onNavigateStudio,
-  onNavigateAdmin,
   isPlanModalOpen = false,
   onOpenCreateModal,
   onOpenPlanModal,
@@ -62,7 +56,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenTutorials,
   onOpenNotificationsModal,
   onOpenGmail,
-  onOpenArchitecture,
   onOpenLegal,
   onLogout,
 }) => {
@@ -75,26 +68,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Radio,
       badge: activeStreamsCount > 0 ? `${activeStreamsCount} Live` : undefined,
       badgeColor: 'text-emerald-400 bg-emerald-950/60 border border-emerald-500/20',
-      isActive: currentView === 'studio' && !isPlanModalOpen,
+      isActive: !isPlanModalOpen,
       onClick: () => {
         onNavigateStudio();
         onCloseMobile();
       },
     },
-    ...(onNavigateAdmin
-      ? [
-          {
-            id: 'admin',
-            label: 'Admin Portal',
-            icon: ShieldCheck,
-            isActive: currentView === 'admin' && !isPlanModalOpen,
-            onClick: () => {
-              onNavigateAdmin();
-              onCloseMobile();
-            },
-          },
-        ]
-      : []),
     {
       id: 'plans',
       label: 'Plans & Billing',
@@ -119,20 +98,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
         onCloseMobile();
       },
     },
-    ...(onOpenArchitecture
-      ? [
-          {
-            id: 'architecture',
-            label: 'System Blueprint',
-            icon: Layers,
-            isActive: false,
-            onClick: () => {
-              onOpenArchitecture();
-              onCloseMobile();
-            },
-          },
-        ]
-      : []),
     {
       id: 'tutorials',
       label: 'Documentation',
@@ -185,12 +150,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
           isMobileOpen
             ? 'translate-x-0 shadow-2xl'
             : '-translate-x-full lg:translate-x-0'
-        } ${isCollapsed ? 'lg:w-20' : 'lg:w-64'} w-72`}
+        } ${isCollapsed ? 'lg:w-[88px]' : 'lg:w-64'} w-72`}
       >
         {/* Sidebar Header / Brand Logo & Toggle Controls */}
         <div
-          className={`h-16 flex items-center justify-between border-b border-slate-800/80 shrink-0 transition-all ${
-            isCollapsed && !isMobileOpen ? 'px-2' : 'px-3.5'
+          className={`h-16 flex items-center justify-between border-b border-slate-800/80 shrink-0 w-full transition-all ${
+            isCollapsed && !isMobileOpen ? 'px-2.5' : 'px-4'
           }`}
         >
           {/* Logo & Brand Title */}
@@ -199,7 +164,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
               onNavigateStudio();
               onCloseMobile();
             }}
-            className="flex items-center space-x-2.5 cursor-pointer min-w-0 flex-1 mr-2 overflow-hidden select-none"
+            className={`flex items-center cursor-pointer min-w-0 select-none ${
+              isCollapsed && !isMobileOpen
+                ? 'space-x-1.5'
+                : 'space-x-2.5 flex-1 mr-3 overflow-hidden'
+            }`}
             title="StreamPulse - Cloud Live Studio"
           >
             <div
@@ -232,21 +201,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {/* Desktop Collapse / Expand Toggle Button */}
           <button
             onClick={onToggleCollapse}
-            className="hidden lg:flex items-center justify-center w-7 h-7 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer shrink-0"
+            className={`hidden lg:flex items-center justify-center rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer shrink-0 ${
+              isCollapsed && !isMobileOpen ? 'w-7 h-7' : 'w-8 h-8'
+            }`}
             title={isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
             aria-label={isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
           >
             {isCollapsed ? (
-              <ChevronRight className="w-3.5 h-3.5" />
+              <ChevronRight className="w-4 h-4" />
             ) : (
-              <ChevronLeft className="w-3.5 h-3.5" />
+              <ChevronLeft className="w-4 h-4" />
             )}
           </button>
 
           {/* Mobile Close Button */}
           <button
             onClick={onCloseMobile}
-            className="lg:hidden flex items-center justify-center w-7 h-7 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer shrink-0"
+            className="lg:hidden flex items-center justify-center w-8 h-8 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer shrink-0"
             aria-label="Close navigation"
             title="Close navigation"
           >

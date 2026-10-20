@@ -207,7 +207,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
   const whatsappUrl = `https://wa.me/${WHATSAPP_NUMBER.replace(/[^0-9]/g, '')}?text=${whatsappMessage}`;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-4 overflow-y-auto">
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-4 overflow-y-auto">
       <div className="w-full max-w-xl rounded-3xl bg-slate-900 border border-slate-800 p-5 sm:p-7 space-y-6 shadow-2xl my-8 text-slate-100 max-h-[92vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-center justify-between pb-4 border-b border-slate-800">

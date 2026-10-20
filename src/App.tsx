@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Navbar } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
 import { StreamingDashboard } from './components/StreamingDashboard';
@@ -12,31 +12,90 @@ import { AuthModal } from './components/AuthModal';
 import { NotificationsCenterModal } from './components/NotificationsCenterModal';
 import { LegalTermsModal } from './components/LegalTermsModal';
 import { TutorialsModal } from './components/TutorialsModal';
-import { AdminDashboardPortal } from './components/AdminDashboardPortal';
 import { GmailManagerModal } from './components/GmailManagerModal';
-import { ArchitectureVault } from './components/ArchitectureVault';
 import { apiClient, UserProfile } from './services/apiClient';
-import { Loader2, X, Layers, CreditCard } from 'lucide-react';
+import { Loader2, X, CreditCard, Volume2 } from 'lucide-react';
 import { RealtimeSyncProvider, useRealtimeSync } from './context/RealtimeSyncContext';
 
-const isCurrentUrlAdmin = (): boolean => {
-  if (typeof window === 'undefined') return false;
-  const host = window.location.hostname.toLowerCase();
-  const path = window.location.pathname.toLowerCase();
-  return (
-    host === 'admin.streampulse.io' ||
-    host.startsWith('admin.') ||
-    path.startsWith('/admin')
-  );
-};
+/**
+ * Custom hook that plays a subtle, pleasant notification chime
+ * whenever RealtimeSyncProvider receives a new broadcast notice.
+ */
+export function useBroadcastNoticeSound(broadcastNotice: string | null) {
+  const previousNoticeRef = useRef<string | null>(null);
+
+  const playSubtleChime = useCallback(() => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+
+      const now = ctx.currentTime;
+
+      // Primary tone: warm sine wave at 587.33 Hz (D5)
+      const osc1 = ctx.createOscillator();
+      const gain1 = ctx.createGain();
+      osc1.type = 'sine';
+      osc1.frequency.setValueAtTime(587.33, now);
+
+      gain1.gain.setValueAtTime(0, now);
+      gain1.gain.linearRampToValueAtTime(0.06, now + 0.02);
+      gain1.gain.exponentialRampToValueAtTime(0.0001, now + 0.3);
+
+      osc1.connect(gain1);
+      gain1.connect(ctx.destination);
+
+      // Secondary tone: bright, pleasant chime harmonic at 880 Hz (A5)
+      const osc2 = ctx.createOscillator();
+      const gain2 = ctx.createGain();
+      osc2.type = 'sine';
+      osc2.frequency.setValueAtTime(880, now + 0.08);
+
+      gain2.gain.setValueAtTime(0, now + 0.08);
+      gain2.gain.linearRampToValueAtTime(0.07, now + 0.1);
+      gain2.gain.exponentialRampToValueAtTime(0.0001, now + 0.45);
+
+      osc2.connect(gain2);
+      gain2.connect(ctx.destination);
+
+      osc1.start(now);
+      osc1.stop(now + 0.32);
+      osc2.start(now + 0.08);
+      osc2.stop(now + 0.48);
+
+      // Clean up audio context resources
+      setTimeout(() => {
+        try {
+          ctx.close();
+        } catch {}
+      }, 600);
+    } catch (e) {
+      // Audio playback fails silently if browser policy blocks autoplay before interaction
+      console.debug('[RealtimeSync Audio] Chime skipped:', e);
+    }
+  }, []);
+
+  useEffect(() => {
+    // Only trigger when a new, non-empty notice arrives that is different from previous
+    if (broadcastNotice && broadcastNotice.trim() !== '' && broadcastNotice !== previousNoticeRef.current) {
+      playSubtleChime();
+    }
+    previousNoticeRef.current = broadcastNotice;
+  }, [broadcastNotice, playSubtleChime]);
+}
 
 function MainApp() {
   const { broadcastNotice } = useRealtimeSync();
+
+  // Play subtle notification sound when RealtimeSyncProvider receives a new broadcast notice
+  useBroadcastNoticeSound(broadcastNotice);
+
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [isLoadingUser, setIsLoadingUser] = useState<boolean>(true);
-  const [currentView, setCurrentView] = useState<'studio' | 'admin'>(() => {
-    return isCurrentUrlAdmin() ? 'admin' : 'studio';
-  });
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
   const [activeStreamsCount, setActiveStreamsCount] = useState<number>(0);
@@ -47,34 +106,12 @@ function MainApp() {
   const [isNotificationsModalOpen, setIsNotificationsModalOpen] = useState<boolean>(false);
   const [isTutorialsModalOpen, setIsTutorialsModalOpen] = useState<boolean>(false);
   const [isGmailModalOpen, setIsGmailModalOpen] = useState<boolean>(false);
-  const [isArchitectureModalOpen, setIsArchitectureModalOpen] = useState<boolean>(false);
   const [isLegalModalOpen, setIsLegalModalOpen] = useState<boolean>(false);
   const [legalInitialTab, setLegalInitialTab] = useState<'terms' | 'privacy'>('terms');
   const [legalInitialSection, setLegalInitialSection] = useState<string | undefined>(undefined);
 
-  // Sync back/forward browser history
-  useEffect(() => {
-    const onPopState = () => {
-      setCurrentView(isCurrentUrlAdmin() ? 'admin' : 'studio');
-    };
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
-  }, []);
-
-  const handleNavigateToAdmin = () => {
-    setCurrentView('admin');
-    try {
-      if (window.location.hostname !== 'admin.streampulse.io') {
-        window.history.pushState({ view: 'admin' }, '', '/admin');
-      }
-    } catch (e) {}
-  };
-
   const handleNavigateToStudio = () => {
-    setCurrentView('studio');
-    try {
-      window.history.pushState({ view: 'studio' }, '', '/');
-    } catch (e) {}
+    setIsPlanModalOpen(false);
   };
 
   const handleOpenLegal = (tab?: 'terms' | 'privacy', sectionId?: string) => {
@@ -160,18 +197,6 @@ function MainApp() {
     setIsPlanModalOpen(false);
   };
 
-  // Quick verification helper: toggle current user status to 'unpaid' to test the guard
-  const handleSimulateUnpaid = async () => {
-    if (!currentUser) return;
-    try {
-      const updated = await apiClient.resetSubscriptionStatus(currentUser.id, 'unpaid');
-      setCurrentUser(updated);
-      setIsPlanModalOpen(false);
-    } catch (e) {
-      console.error('Failed to simulate unpaid status', e);
-    }
-  };
-
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex font-sans selection:bg-red-600 selection:text-white">
       {/* Sleek, Collapsible Modern Side Navigation Bar (Sidebar) */}
@@ -179,14 +204,12 @@ function MainApp() {
         currentUser={currentUser}
         activeStreamsCount={activeStreamsCount}
         unreadNotificationsCount={unreadNotificationsCount}
-        currentView={currentView}
         isCollapsed={isSidebarCollapsed}
         onToggleCollapse={() => setIsSidebarCollapsed((prev: boolean) => !prev)}
         isMobileOpen={isMobileSidebarOpen}
         onCloseMobile={() => setIsMobileSidebarOpen(false)}
         onOpenMobile={() => setIsMobileSidebarOpen(true)}
         onNavigateStudio={handleNavigateToStudio}
-        onNavigateAdmin={handleNavigateToAdmin}
         isPlanModalOpen={isPlanModalOpen}
         onOpenCreateModal={() => setIsCreateModalOpen(true)}
         onOpenPlanModal={() => setIsPlanModalOpen(true)}
@@ -194,7 +217,6 @@ function MainApp() {
         onOpenTutorials={() => setIsTutorialsModalOpen(true)}
         onOpenNotificationsModal={() => setIsNotificationsModalOpen(true)}
         onOpenGmail={() => setIsGmailModalOpen(true)}
-        onOpenArchitecture={() => setIsArchitectureModalOpen(true)}
         onOpenLegal={handleOpenLegal}
         onLogout={handleLogout}
       />
@@ -202,7 +224,7 @@ function MainApp() {
       {/* Main Content Area adjusting dynamically with left margin so it never overlaps sidebar */}
       <div
         className={`flex-1 flex flex-col min-w-0 transition-all duration-300 ease-in-out ${
-          isSidebarCollapsed ? 'lg:pl-20' : 'lg:pl-64'
+          isSidebarCollapsed ? 'lg:pl-[88px]' : 'lg:pl-64'
         }`}
       >
         {/* Unified Top Navigation Bar across both Mobile and Desktop */}
@@ -210,12 +232,10 @@ function MainApp() {
           currentUser={currentUser}
           activeStreamsCount={activeStreamsCount}
           unreadNotificationsCount={unreadNotificationsCount}
-          currentView={currentView}
           isSidebarCollapsed={isSidebarCollapsed}
           onToggleSidebarCollapse={() => setIsSidebarCollapsed((prev: boolean) => !prev)}
           onOpenMobileSidebar={() => setIsMobileSidebarOpen(true)}
           onNavigateStudio={handleNavigateToStudio}
-          onNavigateAdmin={handleNavigateToAdmin}
           isPlanModalOpen={isPlanModalOpen}
           onOpenCreateModal={() => setIsCreateModalOpen(true)}
           onOpenPlanModal={() => setIsPlanModalOpen(true)}
@@ -225,13 +245,7 @@ function MainApp() {
           onLogout={handleLogout}
         />
         <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
-          {currentView === 'admin' ? (
-            <AdminDashboardPortal
-              currentUser={currentUser}
-              onNavigateToStudio={handleNavigateToStudio}
-              hideHeader={true}
-            />
-          ) : isLoadingUser ? (
+          {isLoadingUser ? (
             <div className="flex flex-col items-center justify-center min-h-[60vh] space-y-3">
               <Loader2 className="w-8 h-8 text-red-500 animate-spin" />
               <p className="text-sm text-slate-400">Loading user profile and studio permissions...</p>
@@ -281,7 +295,6 @@ function MainApp() {
               onOpenPlanModal={() => setIsPlanModalOpen(true)}
               onOpenTutorials={() => setIsTutorialsModalOpen(true)}
               onOpenNotificationsModal={() => setIsNotificationsModalOpen(true)}
-              onSimulateUnpaid={handleSimulateUnpaid}
             />
           )}
         </main>
@@ -368,7 +381,7 @@ function MainApp() {
 
       {/* Plans & Billing Management Modal (Pop-up overlay with zero dead clicks) */}
       {isPlanModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-3 sm:p-6 overflow-y-auto animate-in fade-in duration-200">
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-3 sm:p-6 overflow-y-auto animate-in fade-in duration-200">
           <div className="relative w-full max-w-6xl bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl p-5 sm:p-7 my-auto max-h-[92vh] flex flex-col overflow-hidden">
             {/* Modal Header */}
             <div className="flex items-center justify-between pb-4 border-b border-slate-800 shrink-0 mb-4 sm:mb-6">
@@ -436,37 +449,11 @@ function MainApp() {
         onClose={() => setIsGmailModalOpen(false)}
       />
 
-      {/* System Architecture & Blueprint Modal */}
-      {isArchitectureModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
-          <div className="w-full max-w-5xl rounded-2xl bg-slate-900 border border-slate-800 p-6 space-y-4 shadow-2xl max-h-[90vh] flex flex-col">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800 shrink-0">
-              <div className="flex items-center space-x-2.5">
-                <Layers className="w-5 h-5 text-red-500" />
-                <div>
-                  <h3 className="text-base font-bold text-white">System Architecture &amp; Blueprint</h3>
-                  <p className="text-xs text-slate-400">Database schemas, API gateway, FFmpeg workers, and container configuration</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setIsArchitectureModalOpen(false)}
-                className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-white cursor-pointer transition-colors"
-                aria-label="Close Architecture Modal"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto">
-              <ArchitectureVault />
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Real-Time Auto-Sync Live Toast Notification */}
       {broadcastNotice && (
         <div className="fixed bottom-6 right-6 z-50 flex items-center space-x-3 bg-slate-900/95 border border-emerald-500/50 text-white px-4 py-3 rounded-2xl shadow-2xl backdrop-blur-md animate-fade-in">
           <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+          <Volume2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
           <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Live Sync:</span>
           <span className="text-xs text-slate-200">{broadcastNotice}</span>
         </div>

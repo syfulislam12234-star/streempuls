@@ -206,6 +206,49 @@ export interface UploadedAssetResponse {
   titleSuggestion: string;
 }
 
+// External Admin Application Backend Configuration
+export const EXTERNAL_ADMIN_BASE_URL: string =
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_API_URL) ||
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_BACKEND_URL) ||
+  '';
+
+/**
+ * Generates secure authentication headers (Bearer token, Remote API key, Client identification)
+ * for requests dispatched from this user application to the backend/external admin server.
+ */
+export function getAuthHeaders(extraHeaders?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    ...extraHeaders,
+  };
+
+  if (typeof window !== 'undefined') {
+    const token = localStorage.getItem('streampulse_auth_token') || localStorage.getItem('auth_token');
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    const adminKey = localStorage.getItem('streampulse_admin_key');
+    if (adminKey) {
+      headers['X-Admin-Api-Key'] = adminKey;
+    }
+    const userId = localStorage.getItem('streampulse_user_id');
+    if (userId && !headers['x-user-id']) {
+      headers['x-user-id'] = userId;
+    }
+  }
+
+  // Fallback to environment variables if provided in environment
+  if (!headers['Authorization'] && typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_BEARER_TOKEN) {
+    headers['Authorization'] = `Bearer ${import.meta.env.VITE_ADMIN_BEARER_TOKEN}`;
+  }
+  if (!headers['X-Admin-Api-Key'] && typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_API_KEY) {
+    headers['X-Admin-Api-Key'] = import.meta.env.VITE_ADMIN_API_KEY;
+  }
+
+  return headers;
+}
+
 export const apiClient = {
   // 1. Upload Video to Supabase Storage ('stream-assets') / Server Media Vault
   async uploadVideo(file: File, onProgress?: (percent: number) => void): Promise<UploadedAssetResponse> {
@@ -423,18 +466,6 @@ export const apiClient = {
       enforce_direct_copy_mode: true,
       last_scaled_at: new Date().toISOString(),
     };
-  },
-
-  // 9. Admin dynamic scaling
-  async updateSystemSettings(settings: Partial<SystemSettingsRecord>): Promise<SystemSettingsRecord> {
-    const res = await fetch('/api/admin/scale', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update settings');
-    return data.settings;
   },
 
   // 10. Health check
@@ -673,40 +704,6 @@ export const apiClient = {
     return data;
   },
 
-  // 20. Admin Coupons Manager
-  async getAdminCoupons(): Promise<Coupon[]> {
-    try {
-      const res = await fetch('/api/admin/coupons');
-      if (res.ok) {
-        const data = await res.json();
-        return data.coupons || [];
-      }
-    } catch (e) {}
-    return [];
-  },
-
-  async createAdminCoupon(payload: {
-    code: string;
-    discountType: 'percent' | 'fixed_bdt';
-    discountValue: number;
-    applicableTiers?: SubscriptionTier[];
-    maxUses?: number;
-  }): Promise<Coupon> {
-    const res = await fetch('/api/admin/coupons', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to create promo code');
-    return data.coupon;
-  },
-
-  async deleteAdminCoupon(id: string): Promise<void> {
-    const res = await fetch(`/api/admin/coupons/${id}`, { method: 'DELETE' });
-    if (!res.ok) throw new Error('Failed to deactivate promo code');
-  },
-
   // 21. Tutorial Guide Videos
   async getTutorials(): Promise<TutorialVideo[]> {
     try {
@@ -784,16 +781,6 @@ export const apiClient = {
     } catch (e) {}
   },
 
-  async simulateExpiry(simulationType: '24h' | '2h' | 'expired' | 'reset', userId?: string): Promise<any> {
-    const activeUserId = userId || this.getStoredUserId();
-    const res = await fetch('/api/notifications/simulate-expiry', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ simulationType, userId: activeUserId }),
-    });
-    return res.json();
-  },
-
   // 23. Real-Time Telemetry Snapshot & Event Streaming
   async getStreamTelemetry(streamId: string): Promise<StreamTelemetryData> {
     const res = await fetch(`/api/streams/${streamId}/telemetry`);
@@ -813,67 +800,6 @@ export const apiClient = {
     return () => {
       eventSource.close();
     };
-  },
-
-  // 24. Reset subscription status for verification & demo testing
-  async resetSubscriptionStatus(userId: string, status: SubscriptionStatus = 'unpaid'): Promise<UserProfile> {
-    const res = await fetch('/api/subscription/reset-status', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, status }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to reset status');
-    return data.user;
-  },
-
-  // 25. Admin User Management API Calls
-  async getAdminUsers(): Promise<UserProfile[]> {
-    try {
-      const headers = this.getAdminHeaders();
-      const res = await fetch('/api/admin/users', { headers });
-      if (res.ok) {
-        const data = await res.json();
-        return data.users || [];
-      }
-    } catch (e) {}
-    return [];
-  },
-
-  async updateAdminUserStatus(userId: string, status: string): Promise<UserProfile> {
-    const headers = this.getAdminHeaders({ 'Content-Type': 'application/json' });
-    const res = await fetch(`/api/admin/users/${userId}/status`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ status }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update user status');
-    return data.user;
-  },
-
-  async updateAdminUserPlan(userId: string, tier: SubscriptionTier): Promise<UserProfile> {
-    const headers = this.getAdminHeaders({ 'Content-Type': 'application/json' });
-    const res = await fetch(`/api/admin/users/${userId}/plan`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ tier }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update user plan');
-    return data.user;
-  },
-
-  async updateAdminUserRole(userId: string, role: 'user' | 'admin'): Promise<UserProfile> {
-    const headers = this.getAdminHeaders({ 'Content-Type': 'application/json' });
-    const res = await fetch(`/api/admin/users/${userId}/role`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ role }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update user role');
-    return data.user;
   },
 
   // 26. Manual Payments (bKash & Nagad)
@@ -914,46 +840,6 @@ export const apiClient = {
     return data.url;
   },
 
-  // 27. Admin Payment Approvals
-  async getAdminPaymentRequests(status?: string): Promise<{ paymentRequests: PaymentRequest[]; totalCount: number; pendingCount: number }> {
-    const activeUserId = this.getStoredUserId();
-    const headers = this.getAdminHeaders();
-    const url = status ? `/api/admin/payment-requests?status=${status}` : '/api/admin/payment-requests';
-    const res = await fetch(url, { headers });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to fetch payment requests');
-    return {
-      paymentRequests: data.paymentRequests || [],
-      totalCount: data.totalCount || 0,
-      pendingCount: data.pendingCount || 0,
-    };
-  },
-
-  async approvePaymentRequest(paymentId: string, adminUserId?: string): Promise<{ success: boolean; paymentRequest: PaymentRequest; updatedUser?: UserProfile; message: string }> {
-    const headers = this.getAdminHeaders({ 'Content-Type': 'application/json' });
-    if (adminUserId) headers['x-user-id'] = adminUserId;
-    const res = await fetch(`/api/admin/payment-requests/${paymentId}/approve`, {
-      method: 'POST',
-      headers,
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to approve payment request');
-    return data;
-  },
-
-  async rejectPaymentRequest(paymentId: string, reason?: string, adminUserId?: string): Promise<{ success: boolean; paymentRequest: PaymentRequest; message: string }> {
-    const headers = this.getAdminHeaders({ 'Content-Type': 'application/json' });
-    if (adminUserId) headers['x-user-id'] = adminUserId;
-    const res = await fetch(`/api/admin/payment-requests/${paymentId}/reject`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ reason }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to reject payment request');
-    return data;
-  },
-
   async getPaymentSettings(): Promise<any> {
     try {
       const res = await fetch('/api/payment-settings');
@@ -971,110 +857,6 @@ export const apiClient = {
       rocket_merchant: '01987-654321',
       whatsapp_number: '+8801712345678',
     };
-  },
-
-  async updatePaymentSettings(settings: any): Promise<any> {
-    const headers = this.getAdminHeaders({ 'Content-Type': 'application/json' });
-    const res = await fetch('/api/admin/payment-settings', {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify(settings),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update payment settings');
-    return data.settings;
-  },
-
-  async getAdminUserStats(): Promise<any> {
-    const headers = this.getAdminHeaders();
-    const res = await fetch('/api/admin/user-stats', { headers });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to fetch user statistics');
-    return data.stats;
-  },
-
-  async getAutonomousSystemStatus(): Promise<any> {
-    try {
-      const res = await fetch('/api/autonomous/system-status');
-      if (res.ok) {
-        return await res.json();
-      }
-    } catch (e) {}
-    return {
-      success: true,
-      autonomous_status: '100% ACTIVE',
-      zero_admin_mode: true,
-      human_oversight_required: false,
-      auto_sync: {
-        database_synced: true,
-        rls_enforced: true,
-        last_sync_timestamp: new Date().toISOString(),
-        provider: 'Supabase Enterprise PostgreSQL 15+',
-      },
-    };
-  },
-
-  // --------------------------------------------------------------------------
-  // Admin Secret Security Bridge (x-admin-secret)
-  // --------------------------------------------------------------------------
-  getStoredAdminSecret(): string | null {
-    return localStorage.getItem('streampulse_admin_secret');
-  },
-
-  setStoredAdminSecret(secret: string): void {
-    localStorage.setItem('streampulse_admin_secret', secret);
-  },
-
-  clearStoredAdminSecret(): void {
-    localStorage.removeItem('streampulse_admin_secret');
-  },
-
-  getAdminHeaders(extra: Record<string, string> = {}): Record<string, string> {
-    const headers: Record<string, string> = { ...extra };
-    const secret = this.getStoredAdminSecret();
-    if (secret) {
-      headers['x-admin-secret'] = secret;
-      headers['authorization'] = `Bearer ${secret}`;
-    }
-    const activeUserId = this.getStoredUserId();
-    if (activeUserId) {
-      headers['x-user-id'] = activeUserId;
-    }
-    return headers;
-  },
-
-  async verifyAdminSecret(secret: string): Promise<{ success: boolean; message: string; token?: string }> {
-    const res = await fetch('/api/admin/verify-secret', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ secret }),
-    });
-    const data = await res.json();
-    if (res.ok && data.success) {
-      this.setStoredAdminSecret(secret);
-      return data;
-    }
-    throw new Error(data.error || 'Failed to verify Admin Secret Key');
-  },
-
-  async getAdminSystemConfig(): Promise<any> {
-    const headers = this.getAdminHeaders();
-    const res = await fetch('/api/admin/system-config', { headers });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to fetch admin system config');
-    return data.config;
-  },
-
-  async updateAdminSystemConfig(payload: any): Promise<any> {
-    const headers = this.getAdminHeaders({ 'Content-Type': 'application/json' });
-    const res = await fetch('/api/admin/system-config', {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update system config');
-    return data;
   },
 
   // --------------------------------------------------------------------------
@@ -1105,42 +887,105 @@ export const apiClient = {
     };
   },
 
-  async getAdminSiteContent(): Promise<SiteContent> {
-    const headers = this.getAdminHeaders();
-    const res = await fetch('/api/admin/site-content', { headers });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to fetch admin site content');
-    return data.content;
-  },
+  // ==========================================================================
+  // External Admin App & Remote Management Integration Service Layer
+  // Communicates strictly with separate remote Admin Application backend
+  // ==========================================================================
+  externalAdmin: {
+    getBaseUrl(): string {
+      return EXTERNAL_ADMIN_BASE_URL;
+    },
 
-  async updateAdminSiteContent(payload: Partial<SiteContent>): Promise<{ success: boolean; content: SiteContent; message: string }> {
-    const headers = this.getAdminHeaders({ 'Content-Type': 'application/json' });
-    const res = await fetch('/api/admin/site-content', {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update dynamic legal content');
-    return data;
-  },
+    /**
+     * Synchronize user subscription and entitlement limits directly from external Admin server
+     */
+    async syncUserSubscription(userId: string): Promise<UserProfile> {
+      const targetUrl = EXTERNAL_ADMIN_BASE_URL
+        ? `${EXTERNAL_ADMIN_BASE_URL}/users/${encodeURIComponent(userId)}/subscription`
+        : `/api/subscription/select-plan`;
 
-  async syncConfig(payload: {
-    section?: string;
-    settings?: any;
-    content?: any;
-    tier_limits?: any;
-    announce_message?: string;
-  }): Promise<{ success: boolean; message: string; connectedClientsCount: number; config: any }> {
-    const headers = this.getAdminHeaders({ 'Content-Type': 'application/json' });
-    const res = await fetch('/api/admin/sync-config', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to handshake and sync config');
-    return data;
+      const res = await fetch(targetUrl, {
+        method: 'POST',
+        headers: getAuthHeaders({ 'x-user-id': userId }),
+        body: JSON.stringify({ userId, timestamp: new Date().toISOString() }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to sync subscription with remote admin server');
+      }
+      return data.user;
+    },
+
+    /**
+     * Query remote channel provisioning and worker allocation status from external admin server
+     */
+    async getChannelProvisioningStatus(channelId?: string): Promise<{
+      provisioned: boolean;
+      status: string;
+      activeCluster: string;
+      maxChannelsAllowed: number;
+      assignedWorkerNode?: string;
+    }> {
+      const targetUrl = EXTERNAL_ADMIN_BASE_URL
+        ? `${EXTERNAL_ADMIN_BASE_URL}/channels/provisioning-status${channelId ? `?channelId=${encodeURIComponent(channelId)}` : ''}`
+        : `/api/system-settings`;
+
+      const res = await fetch(targetUrl, {
+        headers: getAuthHeaders(),
+      });
+      const data = await res.json();
+      return {
+        provisioned: true,
+        status: data.cluster_mode || 'production',
+        activeCluster: data.cluster_name || 'Hetzner-Production-Cluster-01',
+        maxChannelsAllowed: data.max_global_streams || 120,
+        assignedWorkerNode: 'stream-worker-node-01',
+      };
+    },
+
+    /**
+     * Request plan change / quota provisioning on external admin backend
+     */
+    async requestPlanChange(userId: string, planTier: SubscriptionTier): Promise<UserProfile> {
+      const targetUrl = EXTERNAL_ADMIN_BASE_URL
+        ? `${EXTERNAL_ADMIN_BASE_URL}/subscriptions/change-plan`
+        : `/api/subscription/select-plan`;
+
+      const res = await fetch(targetUrl, {
+        method: 'POST',
+        headers: getAuthHeaders({ 'x-user-id': userId }),
+        body: JSON.stringify({ userId, planTier }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to update plan on external admin server');
+      }
+      return data.user;
+    },
+
+    /**
+     * Fetch active platform policies, tier limits, and global broadcast rules from external admin backend
+     */
+    async fetchRemotePlatformLimits(): Promise<SiteContent['tier_limits']> {
+      const targetUrl = EXTERNAL_ADMIN_BASE_URL
+        ? `${EXTERNAL_ADMIN_BASE_URL}/config/tier-limits`
+        : `/api/site-content`;
+
+      try {
+        const res = await fetch(targetUrl, { headers: getAuthHeaders() });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.tier_limits) return data.tier_limits;
+          if (data.content?.tier_limits) return data.content.tier_limits;
+        }
+      } catch (e) {}
+
+      return {
+        free: { maxStreams: 1, maxHours: 10, maxChannels: 1, watermark: true },
+        pro: { maxStreams: 2, maxHours: 720, maxChannels: 2, watermark: false },
+        business: { maxStreams: 4, maxHours: -1, maxChannels: 4, watermark: false },
+      };
+    },
   },
 };
 

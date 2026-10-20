@@ -4,13 +4,13 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
-  ShieldCheck,
   Lock,
   User,
   Bell,
   BookOpen,
   Radio,
   ChevronRight,
+  CreditCard,
 } from 'lucide-react';
 import { UserProfile } from '../services/apiClient';
 import logoImg from '../assets/images/streampulse_logo_1791782499836.jpg';
@@ -19,12 +19,11 @@ export interface NavbarProps {
   currentUser: UserProfile | null;
   activeStreamsCount: number;
   unreadNotificationsCount?: number;
-  currentView?: 'studio' | 'admin';
+  currentView?: 'studio';
   isSidebarCollapsed?: boolean;
   onToggleSidebarCollapse?: () => void;
   onOpenMobileSidebar?: () => void;
   onNavigateStudio?: () => void;
-  onNavigateAdmin?: () => void;
   isPlanModalOpen?: boolean;
   onOpenCreateModal: () => void;
   onOpenPlanModal: () => void;
@@ -38,12 +37,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   currentUser,
   activeStreamsCount,
   unreadNotificationsCount = 0,
-  currentView = 'studio',
   isSidebarCollapsed = false,
   onToggleSidebarCollapse,
   onOpenMobileSidebar,
   onNavigateStudio,
-  onNavigateAdmin,
   isPlanModalOpen = false,
   onOpenCreateModal,
   onOpenPlanModal,
@@ -112,17 +109,8 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* Active Workspace / Route Tag */}
             <div className="flex items-center space-x-1.5">
               <span className="text-xs font-semibold text-slate-300">
-                {isPlanModalOpen
-                  ? 'Plans & Billing'
-                  : currentView === 'admin'
-                  ? 'Admin Portal'
-                  : 'Live Studio'}
+                {isPlanModalOpen ? 'Plans & Billing' : 'Live Studio'}
               </span>
-              {currentView === 'admin' && !isPlanModalOpen && (
-                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-md bg-red-950/80 text-red-400 border border-red-800/40 hidden md:inline">
-                  admin.streampulse.io
-                </span>
-              )}
             </div>
           </div>
         </div>
@@ -136,31 +124,26 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span className="text-slate-200 font-medium">Operational</span>
           </div>
 
-          {/* Subscription Tier & Quota Indicator */}
-          {currentUser && (
-            <button
-              onClick={onOpenPlanModal}
-              className={`flex items-center space-x-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors cursor-pointer ${
-                isPlanModalOpen
-                  ? 'bg-red-950/40 border-red-600/70 text-white shadow-sm'
-                  : isPlanActive
-                  ? 'bg-slate-900 border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800'
-                  : 'bg-amber-950/40 border-amber-800/60 text-amber-300 hover:bg-amber-900/40'
-              }`}
-              title="Click to view subscription plan details and limits"
-            >
-              {isPlanActive ? (
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              ) : (
-                <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              )}
-              <span className="capitalize">
-                {isPlanActive
-                  ? `${currentUser.subscription_tier} Plan`
-                  : 'Plans'}
-              </span>
-            </button>
-          )}
+          {/* Plans & Billing Button */}
+          <button
+            onClick={onOpenPlanModal}
+            className={`flex items-center space-x-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors cursor-pointer ${
+              isPlanModalOpen
+                ? 'bg-red-950/40 border-red-600/70 text-white shadow-sm'
+                : isPlanActive
+                ? 'bg-slate-900 border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800'
+                : 'bg-amber-950/40 border-amber-800/60 text-amber-300 hover:bg-amber-900/40'
+            }`}
+            title="Click to view subscription plans, quotas, and billing"
+          >
+            <CreditCard className="w-3.5 h-3.5 text-red-400 shrink-0" />
+            <span className="capitalize hidden xs:inline">
+              {currentUser?.subscription_tier
+                ? `${currentUser.subscription_tier} Plan`
+                : 'Plans & Billing'}
+            </span>
+            <span className="capitalize xs:hidden">Plans</span>
+          </button>
 
           {/* Broadcast Status Indicator */}
           {isPlanActive && (
