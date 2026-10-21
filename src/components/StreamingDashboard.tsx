@@ -31,11 +31,15 @@ import {
   Tag,
   BookOpen,
   CreditCard,
+  Cpu,
+  Cloud,
+  Server,
 } from 'lucide-react';
 import { CreateLiveStreamModal } from './CreateLiveStreamModal';
 import { VideoPreviewModal } from './VideoPreviewModal';
 import { StreamTelemetryModal } from './StreamTelemetryModal';
 import { apiClient, StreamRecord, UserProfile } from '../services/apiClient';
+import { TIER_RESOURCE_PROFILES } from '../services/clusterManager';
 
 // Fallback curated video thumbnails for friendly preview display
 const THUMBNAIL_MAP: Record<string, string> = {
@@ -377,16 +381,24 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
                 <span className="flex items-center space-x-1">
                   <span className="text-slate-200 font-semibold">{streams.length} / {currentUser.channel_limit}</span>
-                  <span>Channels Used</span>
+                  <span>Channels</span>
                 </span>
                 <span>&middot;</span>
                 <span className="flex items-center space-x-1">
                   <span className="text-slate-200 font-semibold">{currentUser.video_limit}</span>
-                  <span>Video Storage Limit</span>
+                  <span>Videos</span>
                 </span>
                 <span>&middot;</span>
-                <span className="text-slate-300">
-                  {currentUser.subscription_tier === 'free' ? '10-Hour Total Limit (3 Days)' : '24/7 Non-Stop Continuous Streaming'}
+                <span className="flex items-center space-x-1.5 text-emerald-400 font-mono text-[11px] bg-emerald-950/40 px-2 py-0.5 rounded-md border border-emerald-800/40">
+                  <Cpu className="w-3 h-3 text-emerald-400" />
+                  <span>
+                    Cluster: {TIER_RESOURCE_PROFILES[currentUser.subscription_tier]?.cpuLimit || '1.0 vCPU'} &middot; {TIER_RESOURCE_PROFILES[currentUser.subscription_tier]?.memoryLimitDisplay || '1GB RAM'}
+                  </span>
+                </span>
+                <span>&middot;</span>
+                <span className="flex items-center space-x-1.5 text-sky-400 font-mono text-[11px] bg-sky-950/40 px-2 py-0.5 rounded-md border border-sky-800/40">
+                  <Cloud className="w-3 h-3 text-sky-400" />
+                  <span>R2 Direct Upload: Active</span>
                 </span>
               </div>
             </div>

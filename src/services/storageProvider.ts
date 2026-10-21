@@ -42,6 +42,15 @@ export interface StorageHealthStatus {
   message: string;
 }
 
+export interface PresignedUploadResult {
+  uploadUrl: string;
+  publicUrl: string;
+  key: string;
+  provider: StorageProviderType;
+  headers: Record<string, string>;
+  expiresInSeconds: number;
+}
+
 /**
  * Universal Storage Provider Interface
  */
@@ -58,6 +67,12 @@ export interface IStorageProvider {
   getPublicUrl(fileName: string): string;
 
   getSignedUrl(fileName: string, expiresInSeconds?: number): Promise<string>;
+
+  getPresignedUploadUrl(
+    fileName: string,
+    contentType?: string,
+    expiresInSeconds?: number
+  ): Promise<PresignedUploadResult>;
 
   delete(fileName: string): Promise<boolean>;
 
@@ -111,6 +126,50 @@ export class SupabaseStorageAdapter implements IStorageProvider {
     } catch (err: any) {
       console.warn(`[Supabase Storage Adapter] Signed URL error for ${cleanPath}:`, err.message);
       return this.getPublicUrl(cleanPath);
+    }
+  }
+
+  async getPresignedUploadUrl(
+    fileName: string,
+    contentType: string = 'video/mp4',
+    expiresInSeconds: number = 3600
+  ): Promise<PresignedUploadResult> {
+    const cleanPath = fileName.replace(/^\/+/, '');
+    const publicUrl = this.getPublicUrl(cleanPath);
+
+    try {
+      const { data, error } = await this.client.storage
+        .from(this.bucketName)
+        .createSignedUploadUrl(cleanPath);
+
+      if (error || !data) {
+        return {
+          uploadUrl: `/api/upload/direct?key=${encodeURIComponent(cleanPath)}&provider=supabase`,
+          publicUrl,
+          key: cleanPath,
+          provider: 'supabase',
+          headers: { 'Content-Type': contentType },
+          expiresInSeconds,
+        };
+      }
+
+      return {
+        uploadUrl: data.signedUrl,
+        publicUrl,
+        key: cleanPath,
+        provider: 'supabase',
+        headers: { 'Content-Type': contentType },
+        expiresInSeconds,
+      };
+    } catch {
+      return {
+        uploadUrl: `/api/upload/direct?key=${encodeURIComponent(cleanPath)}&provider=supabase`,
+        publicUrl,
+        key: cleanPath,
+        provider: 'supabase',
+        headers: { 'Content-Type': contentType },
+        expiresInSeconds,
+      };
     }
   }
 
@@ -244,6 +303,58 @@ export class CloudflareR2StorageAdapter implements IStorageProvider {
     } catch (err: any) {
       console.warn(`[Cloudflare R2 Adapter] Presigned URL error for ${cleanPath}:`, err.message);
       return this.getPublicUrl(cleanPath);
+    }
+  }
+
+  async getPresignedUploadUrl(
+    fileName: string,
+    contentType: string = 'video/mp4',
+    expiresInSeconds: number = 3600
+  ): Promise<PresignedUploadResult> {
+    const cleanPath = fileName.replace(/^\/+/, '');
+    const publicUrl = this.getPublicUrl(cleanPath);
+
+    if (!this.s3Client) {
+      // Mock / fallback direct URL if S3 credentials are not yet configured in environment
+      return {
+        uploadUrl: `/api/upload/direct?key=${encodeURIComponent(cleanPath)}&provider=r2`,
+        publicUrl,
+        key: cleanPath,
+        provider: 'r2',
+        headers: { 'Content-Type': contentType },
+        expiresInSeconds,
+      };
+    }
+
+    try {
+      const command = new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: cleanPath,
+        ContentType: contentType,
+      });
+
+      const uploadUrl = await getS3SignedUrl(this.s3Client, command, { expiresIn: expiresInSeconds });
+
+      return {
+        uploadUrl,
+        publicUrl,
+        key: cleanPath,
+        provider: 'r2',
+        headers: {
+          'Content-Type': contentType,
+        },
+        expiresInSeconds,
+      };
+    } catch (err: any) {
+      console.warn(`[Cloudflare R2 Adapter] Error generating presigned PUT URL for ${cleanPath}:`, err.message);
+      return {
+        uploadUrl: `/api/upload/direct?key=${encodeURIComponent(cleanPath)}&provider=r2`,
+        publicUrl,
+        key: cleanPath,
+        provider: 'r2',
+        headers: { 'Content-Type': contentType },
+        expiresInSeconds,
+      };
     }
   }
 

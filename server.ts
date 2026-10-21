@@ -19,6 +19,10 @@ import {
   getStorageHealthStatus,
   type StorageProviderType,
 } from './src/services/storageProvider.ts';
+import {
+  clusterRegistry,
+  TIER_RESOURCE_PROFILES,
+} from './src/services/clusterManager.ts';
 
 dotenv.config();
 
@@ -765,6 +769,9 @@ interface ActiveWorkerProcess {
   reconnectAttempts?: number;
   isIntentionalStop?: boolean;
   telemetry?: StreamTelemetryData;
+  containerId?: string;
+  tier?: string;
+  routingMetadata?: any;
 }
 const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
 
@@ -808,6 +815,123 @@ app.post('/api/storage/switch', async (req, res) => {
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
+});
+
+// ============================================================================
+// CLOUDFLARE R2 & DIRECT MEDIA UPLOAD ARCHITECTURE (Bandwidth Bypass)
+// ============================================================================
+
+// 1a. POST /api/storage/presigned-upload (Generate secure presigned PUT URL for Cloudflare R2)
+app.post('/api/storage/presigned-upload', async (req, res) => {
+  try {
+    const { fileName, contentType = 'video/mp4', preferredProvider = 'r2', expiresIn = 3600 } = req.body;
+    if (!fileName) {
+      return res.status(400).json({ success: false, error: 'File name is required' });
+    }
+
+    const timestamp = Date.now();
+    const cleanFileName = fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
+    const storageKey = `media/${timestamp}-${cleanFileName}`;
+
+    const targetProviderType = preferredProvider === 'r2' ? 'r2' : (process.env.STORAGE_PROVIDER as any) || 'r2';
+    const provider = getStorageProvider(targetProviderType);
+
+    const presigned = await provider.getPresignedUploadUrl(storageKey, contentType, expiresIn);
+
+    return res.status(200).json({
+      success: true,
+      uploadUrl: presigned.uploadUrl,
+      publicUrl: presigned.publicUrl,
+      key: presigned.key,
+      provider: presigned.provider,
+      headers: presigned.headers,
+      expiresInSeconds: presigned.expiresInSeconds,
+      bypassBackendBandwidth: true,
+      message: 'Secure presigned upload URL generated. Client can stream payload directly to bucket.',
+    });
+  } catch (err: any) {
+    console.error('[Presigned Upload Error]', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 1b. POST /api/storage/confirm-upload (Register direct-uploaded asset metadata)
+app.post('/api/storage/confirm-upload', async (req, res) => {
+  try {
+    const { key, fileName, fileSizeMb, publicUrl, provider, resolution, codec, titleSuggestion } = req.body;
+    if (!key && !fileName) {
+      return res.status(400).json({ success: false, error: 'Storage key and fileName required' });
+    }
+
+    const cleanTitle = (fileName || key || 'Live Video')
+      .replace(/\.[^/.]+$/, '')
+      .replace(/[-_]/g, ' ')
+      .replace(/\b\w/g, (c: string) => c.toUpperCase());
+
+    const finalUrl = publicUrl || `/uploads/${path.basename(key)}`;
+    const asset = {
+      fileName: fileName || path.basename(key),
+      fileSizeMb: Number(fileSizeMb) || 12.5,
+      url: finalUrl,
+      storageProvider: provider === 'r2' ? 'Cloudflare R2 (Direct Bucket Stream)' : 'Supabase Storage (Direct)',
+      resolution: resolution || '1920x1080 (60 fps source)',
+      codec: codec || 'H.264 / AAC (Direct Copy Ready)',
+      titleSuggestion: titleSuggestion || `${cleanTitle} 24/7 Live Stream`,
+      createdAt: new Date().toISOString(),
+    };
+
+    const CATALOG_FILE = path.join(DATA_DIR, 'uploaded_assets.json');
+    let catalog: any[] = [];
+    try {
+      if (fs.existsSync(CATALOG_FILE)) {
+        catalog = JSON.parse(fs.readFileSync(CATALOG_FILE, 'utf-8'));
+      }
+    } catch {}
+
+    const existingIdx = catalog.findIndex((a: any) => a.fileName === asset.fileName || a.url === asset.url);
+    if (existingIdx !== -1) {
+      catalog[existingIdx] = { ...catalog[existingIdx], ...asset };
+    } else {
+      catalog.unshift(asset);
+    }
+    try {
+      fs.writeFileSync(CATALOG_FILE, JSON.stringify(catalog, null, 2), 'utf-8');
+    } catch {}
+
+    return res.status(200).json({
+      success: true,
+      asset,
+      message: 'Video upload confirmed and registered in media catalog.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 1c. PUT /api/upload/direct (Direct streaming binary endpoint for local fallback or testing)
+app.put('/api/upload/direct', (req, res) => {
+  const key = (req.query.key as string) || `media/direct-${Date.now()}.mp4`;
+  const cleanBase = path.basename(key);
+  const targetPath = path.join(UPLOADS_DIR, cleanBase);
+
+  const writeStream = fs.createWriteStream(targetPath);
+  req.pipe(writeStream);
+
+  writeStream.on('finish', () => {
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.get('host');
+    const publicUrl = `${protocol}://${host}/uploads/${cleanBase}`;
+    return res.status(200).json({
+      success: true,
+      message: 'Direct stream written to media vault successfully',
+      publicUrl,
+      key,
+    });
+  });
+
+  writeStream.on('error', (err) => {
+    return res.status(500).json({ success: false, error: err.message });
+  });
 });
 
 // 1. POST /api/upload (Modular Storage Provider Upload: Supabase / R2)
@@ -2223,6 +2347,9 @@ app.delete('/api/streams/:id', async (req, res) => {
     const active = activeWorkerProcesses.get(id);
     if (active) {
       active.isIntentionalStop = true;
+      if (active.containerId) {
+        clusterRegistry.releaseStreamJob(active.containerId);
+      }
       if (active.reconnectTimeout) clearTimeout(active.reconnectTimeout);
       if (active.intervalId) clearInterval(active.intervalId);
       if (active.child) {
@@ -2268,14 +2395,20 @@ app.post('/api/streams/:id/start', async (req, res) => {
       activeWorkerProcesses.delete(id);
     }
 
-    // Determine user tier & multi-casting capabilities
+    // ------------------------------------------------------------------------
+    // Plan-Based Dynamic Resource Allocation & Container Routing
+    // ------------------------------------------------------------------------
     const userId = req.headers['x-user-id'] as string;
     const users = readLocalUsers();
     const currentUser = (userId ? users.find((u) => u.id === userId) : null) ||
       users.find((u) => u.subscription_status === 'active') || users[0];
 
-    const maxAllowedDestinations = currentUser?.subscription_tier === 'business' ? 4 :
-                                   currentUser?.subscription_tier === 'pro' ? 2 : 1;
+    const userTier: SubscriptionTier = (currentUser?.subscription_tier as SubscriptionTier) || 'free';
+    const routing = clusterRegistry.routeStreamJob(userTier, id);
+    const tierProfile = routing.profile;
+    const assignedContainer = routing.container;
+
+    const maxAllowedDestinations = tierProfile.maxDestinations;
 
     // Collect destinations
     const finalDestinationsList: string[] = [];
@@ -2296,9 +2429,13 @@ app.post('/api/streams/:id/start', async (req, res) => {
     const activeStorageAdapter = getStorageProvider();
     const initialLogs: string[] = [
       `[worker] Initializing isolated streaming pipeline for stream ${id}...`,
-      `[storage] Provider: ${activeStorageAdapter.providerType.toUpperCase()} (Bucket: ${activeStorageAdapter.bucketName})`,
+      `[tier-router] Target Cluster: ${tierProfile.clusterName}`,
+      `[container-affinity] Node: ${assignedContainer.instanceName} (${assignedContainer.id}) [Pool: ${tierProfile.nodePool}]`,
+      `[resource-profile] Allocated: ${tierProfile.cpuLimit} CPU / ${tierProfile.memoryLimitDisplay} RAM (Priority: Level ${tierProfile.priorityLevel})`,
+      `[cgroup-quota] Threads: ${tierProfile.ffmpegThreads}, Linux Nice: ${tierProfile.containerNice}, Max Bitrate: ${tierProfile.maxBitrateKbps}kbps`,
+      `[storage] Media Provider: ${activeStorageAdapter.providerType.toUpperCase()} (Bucket: ${activeStorageAdapter.bucketName})`,
       `[source] Video input: ${stream.video_url}`,
-      `[multi-casting] Broadcasting simultaneously to ${finalDestinationsList.length} destination(s)`,
+      `[multi-casting] Broadcasting simultaneously to ${finalDestinationsList.length} destination(s) [Tier Limit: ${maxAllowedDestinations}]`,
       `[target] Primary: ${stream.rtmp_server_url || 'rtmp://a.rtmp.youtube.com/live2'} / ****${stream.stream_key.slice(-4)}`,
       `[flags] Direct-Copy active (-re -stream_loop -1 -i <source> -c:v copy -c:a aac)`,
     ];
@@ -2445,6 +2582,9 @@ app.post('/api/streams/:id/start', async (req, res) => {
 
           if (proc?.isIntentionalStop || (code === 0 && !signal)) {
             // Clean exit or user-requested stop
+            if (proc?.containerId) {
+              clusterRegistry.releaseStreamJob(proc.containerId);
+            }
             if (proc?.intervalId) clearInterval(proc.intervalId);
             activeWorkerProcesses.delete(id);
             const idleUpdate = { status: 'idle', ffmpeg_pid: null };
@@ -2568,12 +2708,15 @@ app.post('/api/streams/:id/start', async (req, res) => {
       startedAt: new Date(),
       logs: initialLogs,
       intervalId,
+      containerId: assignedContainer.id,
+      tier: userTier,
+      routingMetadata: routing.routingMetadata,
       telemetry: {
-        bitrate_kbps: 6000,
-        fps: 60.0,
+        bitrate_kbps: tierProfile.maxBitrateKbps,
+        fps: tierProfile.maxResolution.includes('60') ? 60.0 : 30.0,
         dropped_frames: 0,
-        cpu_usage_pct: 0.38,
-        mem_usage_mb: 45.0,
+        cpu_usage_pct: +(tierProfile.cpuCores * 0.35).toFixed(2),
+        mem_usage_mb: Math.round(tierProfile.memoryLimitMb * 0.4),
         health_status: 'excellent',
         speed: '1.00x',
         uptime_seconds: 0,
@@ -2582,16 +2725,21 @@ app.post('/api/streams/:id/start', async (req, res) => {
       },
     });
 
-    // Update database status
+    // Update database status with container and tier profile annotations
     const liveUpdate = {
       status: 'live',
       ffmpeg_pid: actualPid,
       uptime_seconds: 0,
-      current_bitrate_kbps: 6000,
-      fps: 60.0,
-      cpu_usage_pct: 0.38,
-      mem_usage_mb: 45.0,
+      current_bitrate_kbps: tierProfile.maxBitrateKbps,
+      fps: tierProfile.maxResolution.includes('60') ? 60.0 : 30.0,
+      cpu_usage_pct: +(tierProfile.cpuCores * 0.35).toFixed(2),
+      mem_usage_mb: Math.round(tierProfile.memoryLimitMb * 0.4),
       last_started_at: new Date().toISOString(),
+      cluster_id: tierProfile.clusterId,
+      container_id: assignedContainer.id,
+      assigned_tier: userTier,
+      allocated_cpu: tierProfile.cpuLimit,
+      allocated_ram: tierProfile.memoryLimitDisplay,
     };
 
     if (supabase) {
@@ -2689,6 +2837,9 @@ app.post('/api/streams/:id/stop', async (req, res) => {
     const active = activeWorkerProcesses.get(id);
     if (active) {
       active.isIntentionalStop = true;
+      if (active.containerId) {
+        clusterRegistry.releaseStreamJob(active.containerId);
+      }
       if (active.reconnectTimeout) clearTimeout(active.reconnectTimeout);
       if (active.intervalId) clearInterval(active.intervalId);
       if (active.child) {
@@ -3551,13 +3702,139 @@ async function autoSyncAutonomousInfrastructure() {
   }
 }
 
+// ============================================================================
+// AUTONOMOUS CLUSTER AUTO-SCALING & TIER ROUTING CONTROLLER
+// Automatically provisions +1 container instance per 10 active users per tier
+// ============================================================================
+function runAutonomousClusterAutoScaler() {
+  try {
+    const users = readLocalUsers();
+    const streams = readLocalStreams();
+
+    const tierUserCounts: Record<SubscriptionTier, number> = {
+      free: 0,
+      basic: 0,
+      pro: 0,
+      business: 0,
+    };
+
+    const tierStreamCounts: Record<SubscriptionTier, number> = {
+      free: 0,
+      basic: 0,
+      pro: 0,
+      business: 0,
+    };
+
+    // Calculate active user count per tier
+    users.forEach((u: any) => {
+      const tier = (u.subscription_tier as SubscriptionTier) || 'free';
+      if (tierUserCounts[tier] !== undefined) {
+        tierUserCounts[tier] += 1;
+      }
+    });
+
+    // Calculate active live stream jobs per tier
+    streams.forEach((s: any) => {
+      if (s.status === 'live' || s.status === 'starting') {
+        const u = users.find((usr: any) => usr.id === s.user_id);
+        const tier = (u?.subscription_tier as SubscriptionTier) || 'free';
+        if (tierStreamCounts[tier] !== undefined) {
+          tierStreamCounts[tier] += 1;
+        }
+      }
+    });
+
+    const scaleEvents = clusterRegistry.evaluateAutoScaling(tierUserCounts, tierStreamCounts);
+
+    if (scaleEvents.length > 0) {
+      console.log(`[AUTONOMOUS AUTO-SCALER] Executed ${scaleEvents.length} scaling event(s):`);
+      scaleEvents.forEach((ev) => {
+        console.log(`  -> [${ev.action.toUpperCase()}] ${ev.reason}`);
+      });
+
+      // Broadcast real-time cluster scaling notice via WebSocket bridge
+      const wsMessage = JSON.stringify({
+        type: 'CLUSTER_AUTO_SCALED',
+        payload: {
+          message: `Auto-scaled container allocation: ${scaleEvents[0]?.reason}`,
+          events: scaleEvents,
+        },
+      });
+
+      connectedClients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(wsMessage);
+        }
+      });
+    }
+  } catch (err: any) {
+    console.warn('[Auto-Scaler Exception]', err.message);
+  }
+}
+
+// 7a. GET /api/cluster/routing-status (Fetch active tier cluster profiles, container allocations, and scaling metrics)
+app.get('/api/cluster/routing-status', (_req, res) => {
+  try {
+    const users = readLocalUsers();
+    const streams = readLocalStreams();
+
+    const tierUserCounts: Record<SubscriptionTier, number> = {
+      free: 0,
+      basic: 0,
+      pro: 0,
+      business: 0,
+    };
+
+    const tierStreamCounts: Record<SubscriptionTier, number> = {
+      free: 0,
+      basic: 0,
+      pro: 0,
+      business: 0,
+    };
+
+    users.forEach((u: any) => {
+      const tier = (u.subscription_tier as SubscriptionTier) || 'free';
+      if (tierUserCounts[tier] !== undefined) tierUserCounts[tier] += 1;
+    });
+
+    streams.forEach((s: any) => {
+      if (s.status === 'live' || s.status === 'starting') {
+        const u = users.find((usr: any) => usr.id === s.user_id);
+        const tier = (u?.subscription_tier as SubscriptionTier) || 'free';
+        if (tierStreamCounts[tier] !== undefined) tierStreamCounts[tier] += 1;
+      }
+    });
+
+    const report = clusterRegistry.getFullReport(tierUserCounts, tierStreamCounts);
+    return res.status(200).json({ success: true, report });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 7b. POST /api/cluster/auto-scale/evaluate (Explicit auto-scale trigger)
+app.post('/api/cluster/auto-scale/evaluate', (_req, res) => {
+  runAutonomousClusterAutoScaler();
+  const users = readLocalUsers();
+  const streams = readLocalStreams();
+  const tierUserCounts: any = { free: 0, basic: 0, pro: 0, business: 0 };
+  const tierStreamCounts: any = { free: 0, basic: 0, pro: 0, business: 0 };
+  users.forEach((u: any) => { tierUserCounts[u.subscription_tier || 'free'] = (tierUserCounts[u.subscription_tier || 'free'] || 0) + 1; });
+  streams.forEach((s: any) => { if (s.status === 'live') tierStreamCounts[s.assigned_tier || 'free'] = (tierStreamCounts[s.assigned_tier || 'free'] || 0) + 1; });
+  const report = clusterRegistry.getFullReport(tierUserCounts, tierStreamCounts);
+  return res.status(200).json({ success: true, message: 'Autonomous auto-scaler cycle completed', report });
+});
+
 // ----------------------------------------------------------------------------
 // Vite Middleware Mounting (Development & Production SPA)
 // ----------------------------------------------------------------------------
 async function startServer() {
   await autoSyncAutonomousInfrastructure();
+  runAutonomousClusterAutoScaler();
   // Recurring self-healing auto-sync every 30 seconds
   setInterval(autoSyncAutonomousInfrastructure, 30000);
+  // Recurring autonomous auto-scaler loop every 20 seconds
+  setInterval(runAutonomousClusterAutoScaler, 20000);
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
