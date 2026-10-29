@@ -46,7 +46,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile.api
     container_name: streampulse-api
-    restart: always
+    restart: on-failure
     environment:
       - NODE_ENV=production
       - PORT=3000
@@ -78,11 +78,6 @@ services:
         reservations:
           cpus: '0.5'
           memory: 512M
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 10
-        window: 120s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
       interval: 15s
@@ -108,7 +103,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.worker
-    restart: always
+    restart: on-failure
     deploy:
       resources:
         limits:
@@ -117,11 +112,6 @@ services:
         reservations:
           cpus: '0.5'
           memory: 512M
-      restart_policy:
-        condition: any
-        delay: 5s
-        max_attempts: 10
-        window: 120s
     environment:
       - NODE_ENV=production
       - QUEUE_NAME=streaming-queue
