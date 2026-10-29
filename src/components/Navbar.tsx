@@ -11,6 +11,7 @@ import {
   Radio,
   ChevronRight,
   CreditCard,
+  Gift,
 } from 'lucide-react';
 import { UserProfile } from '../services/apiClient';
 import logoImg from '../assets/images/streampulse_logo_1791782499836.jpg';
@@ -28,6 +29,7 @@ export interface NavbarProps {
   onOpenCreateModal: () => void;
   onOpenPlanModal: () => void;
   onOpenAuthModal: () => void;
+  onOpenReferralModal?: () => void;
   onOpenTutorials?: () => void;
   onOpenNotificationsModal?: () => void;
   onLogout: () => void;
@@ -45,6 +47,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenCreateModal,
   onOpenPlanModal,
   onOpenAuthModal,
+  onOpenReferralModal,
   onOpenTutorials,
   onOpenNotificationsModal,
   onLogout,
@@ -194,6 +197,18 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <BookOpen className="w-3.5 h-3.5 text-slate-400" />
               <span className="hidden md:inline">Docs</span>
+            </button>
+          )}
+
+          {/* Referral & Promocodes Portal */}
+          {onOpenReferralModal && (
+            <button
+              onClick={onOpenReferralModal}
+              className="hidden sm:flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 hover:text-amber-200 text-xs font-medium transition-colors cursor-pointer"
+              title="Creator Referral & Promocodes"
+            >
+              <Gift className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden md:inline">Refer &amp; Earn</span>
             </button>
           )}
 

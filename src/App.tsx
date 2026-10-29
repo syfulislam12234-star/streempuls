@@ -13,6 +13,7 @@ import { NotificationsCenterModal } from './components/NotificationsCenterModal'
 import { LegalTermsModal } from './components/LegalTermsModal';
 import { TutorialsModal } from './components/TutorialsModal';
 import { GmailManagerModal } from './components/GmailManagerModal';
+import { UserReferralPortal } from './components/UserReferralPortal';
 import { apiClient, UserProfile } from './services/apiClient';
 import { Loader2, X, CreditCard, Volume2 } from 'lucide-react';
 import { RealtimeSyncProvider, useRealtimeSync } from './context/RealtimeSyncContext';
@@ -102,6 +103,7 @@ function MainApp() {
   const [unreadNotificationsCount, setUnreadNotificationsCount] = useState<number>(0);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
   const [isPlanModalOpen, setIsPlanModalOpen] = useState<boolean>(false);
+  const [isReferralModalOpen, setIsReferralModalOpen] = useState<boolean>(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
   const [isNotificationsModalOpen, setIsNotificationsModalOpen] = useState<boolean>(false);
   const [isTutorialsModalOpen, setIsTutorialsModalOpen] = useState<boolean>(false);
@@ -214,6 +216,7 @@ function MainApp() {
         onOpenCreateModal={() => setIsCreateModalOpen(true)}
         onOpenPlanModal={() => setIsPlanModalOpen(true)}
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
+        onOpenReferralModal={() => setIsReferralModalOpen(true)}
         onOpenTutorials={() => setIsTutorialsModalOpen(true)}
         onOpenNotificationsModal={() => setIsNotificationsModalOpen(true)}
         onOpenGmail={() => setIsGmailModalOpen(true)}
@@ -240,6 +243,7 @@ function MainApp() {
           onOpenCreateModal={() => setIsCreateModalOpen(true)}
           onOpenPlanModal={() => setIsPlanModalOpen(true)}
           onOpenAuthModal={() => setIsAuthModalOpen(true)}
+          onOpenReferralModal={() => setIsReferralModalOpen(true)}
           onOpenTutorials={() => setIsTutorialsModalOpen(true)}
           onOpenNotificationsModal={() => setIsNotificationsModalOpen(true)}
           onLogout={handleLogout}
@@ -378,6 +382,20 @@ function MainApp() {
         onClose={() => setIsTutorialsModalOpen(false)}
         currentUser={currentUser}
       />
+
+      {/* Promocodes & Creator Referral Portal */}
+      {currentUser && (
+        <UserReferralPortal
+          isOpen={isReferralModalOpen}
+          onClose={() => setIsReferralModalOpen(false)}
+          currentUser={currentUser}
+          onUserUpdated={(updated) => setCurrentUser(updated)}
+          onOpenPlanModal={() => {
+            setIsReferralModalOpen(false);
+            setIsPlanModalOpen(true);
+          }}
+        />
+      )}
 
       {/* Plans & Billing Management Modal (Pop-up overlay with zero dead clicks) */}
       {isPlanModalOpen && (

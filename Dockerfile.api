@@ -1,0 +1,18 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Copy package.json and package-lock.json
+COPY package*.json ./
+
+# Use standard npm install to prevent exit code 1 version lock errors
+RUN npm install && npm cache clean --force
+
+# Copy the rest of the application code
+COPY . .
+
+# Expose the API port
+EXPOSE 5000
+
+# Start the application
+CMD ["npm", "start"]

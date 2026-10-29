@@ -17,8 +17,11 @@ import {
   Smartphone,
   Clock,
   ArrowRight,
+  Tag,
+  Gift,
+  Percent,
 } from 'lucide-react';
-import { apiClient, UserProfile, SubscriptionTier, PaymentRequest } from '../services/apiClient';
+import { apiClient, UserProfile, SubscriptionTier, PaymentRequest, ApplyPromoCodeResult } from '../services/apiClient';
 import { useRealtimeSync, useConfigInvalidation } from '../context/RealtimeSyncContext';
 
 interface ManualPaymentModalProps {
@@ -42,7 +45,6 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
 }) => {
   const [paymentMethod, setPaymentMethod] = useState<'bkash' | 'nagad' | 'rocket'>('bkash');
   const [accountType, setAccountType] = useState<'personal' | 'merchant'>('personal');
-  const [trxId, setTrxId] = useState<string>('');
   const [senderPhone, setSenderPhone] = useState<string>('');
   const [screenshotFile, setScreenshotFile] = useState<File | null>(null);
   const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null);
@@ -55,7 +57,73 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
   const [activatedUser, setActivatedUser] = useState<UserProfile | null>(null);
   const [countdownSeconds, setCountdownSeconds] = useState<number>(3600); // 60-minute countdown
 
+  // Promocode / Referral Discount State
+  const [promoCodeInput, setPromoCodeInput] = useState<string>('');
+  const [appliedPromo, setAppliedPromo] = useState<ApplyPromoCodeResult | null>(null);
+  const [isApplyingPromo, setIsApplyingPromo] = useState<boolean>(false);
+  const [promoError, setPromoError] = useState<string | null>(null);
+  const [promoSuccessMsg, setPromoSuccessMsg] = useState<string | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const basePriceBdt = planTier === 'basic' ? 1200 : planTier === 'pro' ? 4000 : 12000;
+  const discountBdt = appliedPromo ? Math.min(appliedPromo.discountBdt, basePriceBdt) : 0;
+  const finalAmountToPay = Math.max(0, basePriceBdt - discountBdt);
+
+  const handleApplyPromo = async (codeOverride?: string) => {
+    const rawCode = codeOverride !== undefined ? codeOverride : promoCodeInput;
+    const code = rawCode.trim().toUpperCase();
+    if (!code) {
+      setPromoError('Please enter a promo code');
+      return;
+    }
+    setIsApplyingPromo(true);
+    setPromoError(null);
+    setPromoSuccessMsg(null);
+    try {
+      const result = await apiClient.applyPromoCode({
+        code,
+        planTier,
+        buyerUserId: currentUser.id,
+      });
+      if (result.valid) {
+        setAppliedPromo(result);
+        setPromoCodeInput(result.code);
+        setPromoSuccessMsg(
+          result.creatorName
+            ? `Code applied! Saved ${result.discountBdt} BDT (${result.discountPercent}% off from creator ${result.creatorName})`
+            : `Code applied! Saved ${result.discountBdt} BDT (${result.discountPercent}% off)`
+        );
+      } else {
+        setAppliedPromo(null);
+        setPromoError(result.message || 'Promo code is invalid or expired.');
+      }
+    } catch (err: any) {
+      setAppliedPromo(null);
+      setPromoError(err.message || 'Failed to apply promo code.');
+    } finally {
+      setIsApplyingPromo(false);
+    }
+  };
+
+  const handleRemovePromo = () => {
+    setAppliedPromo(null);
+    setPromoCodeInput('');
+    setPromoError(null);
+    setPromoSuccessMsg(null);
+  };
+
+  // Auto-detect referral code from URL search parameters on modal open
+  useEffect(() => {
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const refCode = urlParams.get('ref') || urlParams.get('promo') || urlParams.get('coupon');
+      if (refCode && !appliedPromo) {
+        setPromoCodeInput(refCode.toUpperCase());
+        handleApplyPromo(refCode.toUpperCase());
+      }
+    } catch {}
+  }, []);
 
   // 60-minute countdown timer effect upon submission
   useEffect(() => {
@@ -89,9 +157,6 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
   const ROCKET_MERCHANT = paymentSettings.rocket_merchant;
   const WHATSAPP_NUMBER = paymentSettings.whatsapp_number;
   const WHATSAPP_DISPLAY = WHATSAPP_NUMBER;
-
-  const basePriceBdt = planTier === 'basic' ? 1200 : planTier === 'pro' ? 4000 : 12000;
-  const finalAmountToPay = basePriceBdt;
 
   const currentAccountNumber =
     paymentMethod === 'bkash'
@@ -146,14 +211,9 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
     e.preventDefault();
     setErrorMessage(null);
 
-    const cleanTrx = trxId.trim().toUpperCase();
-    if (!cleanTrx) {
-      setErrorMessage('Please enter your Transaction ID (TrxID) received from your bKash, Nagad, or Rocket SMS.');
-      return;
-    }
-
-    if (cleanTrx.length < 5) {
-      setErrorMessage('Transaction ID appears too short. Please verify the code from your payment receipt.');
+    // Streamlined verification: receipt screenshot is primary, sender mobile is optional/companion
+    if (!screenshotFile && !screenshotPreview && !senderPhone.trim()) {
+      setErrorMessage('Please upload your payment receipt screenshot or enter your sender mobile number for verification.');
       return;
     }
 
@@ -181,8 +241,9 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
         paymentMethod,
         accountNumber: currentAccountNumber,
         senderPhone: senderPhone.trim() || undefined,
-        trxId: cleanTrx,
         screenshotUrl: uploadedScreenshotUrl,
+        couponCode: appliedPromo?.code,
+        discountBdt: discountBdt > 0 ? discountBdt : undefined,
       });
 
       setSubmittedPayment(res.paymentRequest);
@@ -202,7 +263,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
   };
 
   const whatsappMessage = encodeURIComponent(
-    `Hello StreamPulse Support,\n\nI have submitted a manual payment for StreamPulse 24/7 Live:\n- Plan: ${planTier.toUpperCase()} Plan (${finalAmountToPay} BDT)\n- Payment Method: ${paymentMethod.toUpperCase()} (${accountType})\n- TrxID: ${trxId.trim() || '[Entering TrxID]'}\n- User Email: ${currentUser.email}\n\nPlease verify and activate my subscription.`
+    `Hello StreamPulse Support,\n\nI have submitted a manual payment for StreamPulse 24/7 Live:\n- Plan: ${planTier.toUpperCase()} Plan (${finalAmountToPay} BDT)\n- Payment Method: ${paymentMethod.toUpperCase()} (${accountType})\n- Sender Mobile: ${senderPhone.trim() || '[Receipt Screenshot Attached]'}\n- User Email: ${currentUser.email}\n\nPlease verify and activate my subscription.`
   );
   const whatsappUrl = `https://wa.me/${WHATSAPP_NUMBER.replace(/[^0-9]/g, '')}?text=${whatsappMessage}`;
 
@@ -294,9 +355,24 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-400">Transaction ID (TrxID):</span>
+                <span className="text-slate-400">Payment Reference:</span>
                 <span className="text-white font-mono font-bold">{submittedPayment.trx_id}</span>
               </div>
+              {submittedPayment.sender_phone && (
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Sender Number:</span>
+                  <span className="text-emerald-400 font-mono font-bold">{submittedPayment.sender_phone}</span>
+                </div>
+              )}
+              {submittedPayment.screenshot_url && (
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-400">Payment Proof:</span>
+                  <span className="text-emerald-400 font-medium flex items-center space-x-1">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Receipt Screenshot Verified</span>
+                  </span>
+                </div>
+              )}
               <div className="flex justify-between">
                 <span className="text-slate-400">Amount:</span>
                 <span className="text-emerald-400 font-bold font-mono">{submittedPayment.amount_bdt.toLocaleString()} BDT</span>
@@ -344,15 +420,111 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
           /* FORM VIEW: INSTRUCTIONS, ACCOUNTS, TRXID & SCREENSHOT                */
           /* ==================================================================== */
           <form onSubmit={handleSubmit} className="space-y-5">
-            {/* 1. Clean Price Summary (Streamlined without Promo Code) */}
-            <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2 text-xs">
+            {/* 1. Price Summary & Promo Code Application */}
+            <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3 text-xs">
               <div className="flex justify-between items-center">
                 <span className="text-slate-400">Plan Selected:</span>
                 <span className="text-white font-extrabold uppercase">{planTier} Plan (30 Days)</span>
               </div>
+              <div className="flex justify-between items-center text-slate-300">
+                <span>Standard Price:</span>
+                <span className="font-mono">{basePriceBdt.toLocaleString()} BDT</span>
+              </div>
+
+              {appliedPromo && (
+                <div className="flex justify-between items-center text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 px-3 py-2 rounded-xl text-xs">
+                  <div className="flex items-center space-x-1.5 min-w-0">
+                    <Tag className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+                    <span className="font-mono font-bold">{appliedPromo.code}</span>
+                    <span className="text-emerald-300/80">({appliedPromo.discountPercent}% OFF)</span>
+                  </div>
+                  <div className="flex items-center space-x-2 shrink-0">
+                    <span className="font-mono font-bold">-{discountBdt.toLocaleString()} BDT</span>
+                    <button
+                      type="button"
+                      onClick={handleRemovePromo}
+                      className="text-slate-400 hover:text-red-400 p-0.5 transition-colors cursor-pointer"
+                      title="Remove promo code"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Promo Code Input Block */}
+              {!appliedPromo ? (
+                <div className="pt-2 border-t border-slate-800/80 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-semibold text-slate-300 flex items-center space-x-1.5">
+                      <Gift className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Have a Promo Code or Referral?</span>
+                    </label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <input
+                        type="text"
+                        value={promoCodeInput}
+                        onChange={(e) => {
+                          setPromoCodeInput(e.target.value.toUpperCase());
+                          if (promoError) setPromoError(null);
+                        }}
+                        placeholder="e.g. PULSE-PRO-VIP / PULSE-PRO-XXXX"
+                        className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-white font-mono text-xs uppercase placeholder:normal-case placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none transition-colors"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleApplyPromo();
+                          }
+                        }}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isApplyingPromo || !promoCodeInput.trim()}
+                      onClick={() => handleApplyPromo()}
+                      className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-bold transition-all duration-200 cursor-pointer flex items-center space-x-1.5 shrink-0"
+                    >
+                      {isApplyingPromo ? (
+                        <>
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          <span>Checking...</span>
+                        </>
+                      ) : (
+                        <span>Apply</span>
+                      )}
+                    </button>
+                  </div>
+                  {promoError && (
+                    <div className="text-[11px] text-red-400 flex items-center space-x-1">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>{promoError}</span>
+                    </div>
+                  )}
+                  {promoSuccessMsg && (
+                    <div className="text-[11px] text-emerald-400 flex items-center space-x-1">
+                      <Check className="w-3.5 h-3.5 shrink-0" />
+                      <span>{promoSuccessMsg}</span>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                promoSuccessMsg && (
+                  <p className="text-[11px] text-emerald-400 font-medium">
+                    {promoSuccessMsg}
+                  </p>
+                )
+              )}
+
               <div className="pt-2 border-t border-slate-800 flex justify-between items-center text-sm">
                 <span className="text-slate-200 font-bold">Total Payable:</span>
                 <div className="text-right">
+                  {discountBdt > 0 && (
+                    <span className="text-xs text-slate-400 line-through mr-2 font-mono">
+                      {basePriceBdt.toLocaleString()} BDT
+                    </span>
+                  )}
                   <span className="text-emerald-400 font-black text-lg font-mono">
                     {finalAmountToPay.toLocaleString()} BDT
                   </span>
@@ -497,7 +669,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                       <strong className="text-emerald-400 font-mono">{finalAmountToPay} BDT</strong>. Use reference:{' '}
                       <strong className="text-slate-300">{currentUser.email.split('@')[0]}</strong>.
                     </p>
-                    <p>&bull; Copy the <strong>Transaction ID (TrxID)</strong> from confirmation SMS and attach receipt screenshot.</p>
+                    <p>&bull; Take a screenshot of the payment confirmation screen or SMS receipt and upload it below.</p>
                   </>
                 ) : (
                   <>
@@ -506,57 +678,35 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                       <strong>{accountType === 'personal' ? 'Send Money' : 'Make Payment'}</strong>.
                     </p>
                     <p>
-                      &bull; Send exactly <strong className="text-emerald-400 font-mono">{finalAmountToPay} BDT</strong>. Use reference:{' '}
+                      &bull; Send exactly <strong className="text-emerald-400 font-mono">{finalAmountToPay} BDT</strong> to <strong className="text-white font-mono">{currentAccountNumber}</strong>. Use reference:{' '}
                       <strong className="text-slate-300">{currentUser.email.split('@')[0]}</strong>.
                     </p>
-                    <p>&bull; Copy the <strong>Transaction ID (TrxID)</strong> and take a receipt screenshot.</p>
+                    <p>&bull; Take a screenshot of the successful transfer receipt and upload it below for verification.</p>
                   </>
                 )}
               </div>
             </div>
 
-            {/* 4. Form Inputs: TrxID & Sender Phone */}
-            <div className="space-y-3.5">
-              <label className="text-xs font-bold text-slate-300 block">
-                3. Enter Payment Verification Details:
-              </label>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <label className="text-[11px] font-semibold text-slate-300 flex items-center space-x-1">
-                    <span>Transaction ID (TrxID)</span>
-                    <span className="text-red-400">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={trxId}
-                    onChange={(e) => setTrxId(e.target.value.toUpperCase())}
-                    placeholder="e.g. BL82K9X9 / 9A87B6C5"
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs uppercase focus:border-emerald-500 focus:outline-none transition-colors"
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <label className="text-[11px] font-semibold text-slate-300">
-                    Sender Mobile Number (Optional)
-                  </label>
-                  <input
-                    type="tel"
-                    value={senderPhone}
-                    onChange={(e) => setSenderPhone(e.target.value)}
-                    placeholder="e.g. 017XXXXXXXX"
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:border-emerald-500 focus:outline-none transition-colors"
-                  />
-                </div>
+            {/* Streamlined Verification: Screenshot Upload (Primary) & Sender Mobile (Tracking) */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-200 block">
+                  3. Payment Verification Proof:
+                </label>
+                <span className="text-[10px] text-emerald-400 font-semibold bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
+                  No TrxID Required
+                </span>
               </div>
 
-              {/* 5. Screenshot Upload Area */}
-              <div className="space-y-1.5">
+              {/* 1. Primary Verification: Payment Receipt Screenshot Upload */}
+              <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <label className="text-[11px] font-semibold text-slate-300 flex items-center space-x-1">
+                  <label className="text-[11px] font-semibold text-slate-300 flex items-center space-x-1.5">
+                    <ImageIcon className="w-3.5 h-3.5 text-emerald-400" />
                     <span>Payment Receipt Screenshot</span>
-                    <span className="text-slate-400 font-normal">(Optional but speeds up approval)</span>
+                    <span className="text-emerald-400 font-bold text-[10px] bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/30">
+                      Primary Verification
+                    </span>
                   </label>
                   {screenshotPreview && (
                     <button
@@ -565,7 +715,7 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                         setScreenshotFile(null);
                         setScreenshotPreview(null);
                       }}
-                      className="text-[10px] text-red-400 hover:text-red-300 flex items-center space-x-1 cursor-pointer"
+                      className="text-[10px] text-red-400 hover:text-red-300 flex items-center space-x-1 cursor-pointer transition-colors"
                     >
                       <Trash2 className="w-3 h-3" />
                       <span>Remove</span>
@@ -574,19 +724,29 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                 </div>
 
                 {screenshotPreview ? (
-                  <div className="relative rounded-2xl bg-slate-950 border border-slate-800 p-3 flex items-center space-x-3.5">
+                  <div className="relative rounded-2xl bg-slate-950 border-2 border-emerald-500/40 p-3.5 flex items-center space-x-4 shadow-lg shadow-emerald-950/20">
                     <img
                       src={screenshotPreview}
-                      alt="Payment screenshot receipt"
-                      className="w-16 h-16 rounded-xl object-cover border border-slate-800 shrink-0"
+                      alt="Payment receipt screenshot"
+                      className="w-16 h-16 sm:w-20 sm:h-20 rounded-xl object-cover border border-emerald-500/50 shrink-0"
                     />
-                    <div className="min-w-0 flex-1 text-xs">
-                      <span className="text-emerald-400 font-semibold block truncate">
-                        {screenshotFile?.name || 'Payment_Receipt_Screenshot.png'}
+                    <div className="min-w-0 flex-1 text-xs space-y-1">
+                      <div className="flex items-center space-x-1.5 text-emerald-400 font-semibold">
+                        <CheckCircle2 className="w-4 h-4 shrink-0" />
+                        <span className="truncate">
+                          {screenshotFile?.name || 'Payment_Receipt_Screenshot.png'}
+                        </span>
+                      </div>
+                      <span className="text-[11px] text-slate-400 block">
+                        {screenshotFile ? `${(screenshotFile.size / 1024).toFixed(1)} KB` : 'Attached proof'} &middot; Ready for instant verification
                       </span>
-                      <span className="text-[10px] text-slate-400 block mt-0.5">
-                        {screenshotFile ? `${(screenshotFile.size / 1024).toFixed(1)} KB` : 'Attached proof'} &middot; Ready for admin review
-                      </span>
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="text-[11px] text-emerald-400 hover:text-emerald-300 underline font-medium cursor-pointer"
+                      >
+                        Change / re-upload image
+                      </button>
                     </div>
                   </div>
                 ) : (
@@ -594,13 +754,20 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                     onDragOver={(e) => e.preventDefault()}
                     onDrop={handleDrop}
                     onClick={() => fileInputRef.current?.click()}
-                    className="p-4 rounded-2xl border-2 border-dashed border-slate-800 hover:border-slate-700 bg-slate-950/60 hover:bg-slate-950 flex flex-col items-center justify-center text-center cursor-pointer transition-colors space-y-1.5"
+                    className="p-5 rounded-2xl border-2 border-dashed border-emerald-500/40 hover:border-emerald-400 bg-emerald-950/10 hover:bg-emerald-950/20 flex flex-col items-center justify-center text-center cursor-pointer transition-all duration-200 space-y-2 group"
                   >
-                    <Upload className="w-5 h-5 text-slate-400" />
-                    <span className="text-xs text-slate-300 font-medium">
-                      Click to upload receipt screenshot or drag &amp; drop
-                    </span>
-                    <span className="text-[10px] text-slate-400">
+                    <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 group-hover:scale-105 transition-transform shadow-inner">
+                      <Upload className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <span className="text-xs sm:text-sm text-white font-bold block">
+                        Click to upload receipt screenshot or drag &amp; drop
+                      </span>
+                      <span className="text-[11px] text-slate-400 block mt-0.5">
+                        Upload your bKash, Nagad, or Rocket confirmation screen or SMS screenshot
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-emerald-400 font-medium px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20">
                       PNG, JPG, JPEG, WebP up to 10MB
                     </span>
                   </div>
@@ -616,6 +783,29 @@ export const ManualPaymentModal: React.FC<ManualPaymentModalProps> = ({
                     }
                   }}
                 />
+              </div>
+
+              {/* 2. Secondary Tracking: Sender Mobile Number */}
+              <div className="space-y-1.5 pt-1">
+                <label className="text-[11px] font-semibold text-slate-300 flex items-center justify-between">
+                  <span className="flex items-center space-x-1.5">
+                    <Smartphone className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Sender Mobile Number</span>
+                  </span>
+                  <span className="text-slate-400 font-normal text-[10px]">
+                    (Optional for payment tracking)
+                  </span>
+                </label>
+                <input
+                  type="tel"
+                  value={senderPhone}
+                  onChange={(e) => setSenderPhone(e.target.value)}
+                  placeholder="e.g. 017XXXXXXXX, 018XXXXXXXX, 019XXXXXXXX"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono text-xs focus:border-emerald-500 focus:outline-none transition-colors"
+                />
+                <p className="text-[10px] text-slate-400">
+                  The mobile wallet number you sent the money from. Used to match payments if needed.
+                </p>
               </div>
             </div>
 

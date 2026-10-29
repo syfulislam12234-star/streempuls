@@ -78,6 +78,83 @@ export interface Coupon {
   created_at: string;
 }
 
+export interface UserPromoCode {
+  id: string;
+  code: string;
+  creator_id: string;
+  creator_email: string;
+  creator_name?: string;
+  creator_tier: SubscriptionTier;
+  discount_percent: number;
+  reward_bdt_per_use: number;
+  usage_count: number;
+  max_uses: number;
+  is_active: boolean;
+  total_earned_bdt: number;
+  referral_link: string;
+  created_at: string;
+  last_used_at?: string;
+}
+
+export interface DailyReferralMetric {
+  date: string;
+  displayDate: string;
+  signups: number;
+  earnedBdt: number;
+  cumulativeEarnedBdt?: number;
+}
+
+export interface UserReferralSummary {
+  user_id: string;
+  user_email: string;
+  user_tier: SubscriptionTier;
+  subscription_status: SubscriptionStatus;
+  can_generate_codes: boolean;
+  tier_restriction_reason?: string;
+  total_referral_earnings_bdt: number;
+  reward_credits_bdt: number;
+  total_referral_uses: number;
+  active_codes_count: number;
+  promo_codes: UserPromoCode[];
+  daily_growth_30d?: DailyReferralMetric[];
+}
+
+export interface ApplyPromoCodeResult {
+  success: boolean;
+  valid: boolean;
+  code: string;
+  discountPercent: number;
+  discountBdt: number;
+  originalPriceBdt: number;
+  finalPriceBdt: number;
+  creatorId?: string | null;
+  creatorName?: string;
+  rewardBdt?: number;
+  message: string;
+}
+
+export interface WithdrawalRequest {
+  id: string;
+  user_id: string;
+  user_email: string;
+  user_name?: string;
+  amount_bdt: number;
+  payment_method: 'bkash' | 'nagad' | 'rocket' | 'bank';
+  account_type?: 'personal' | 'agent' | 'merchant' | 'savings' | 'current';
+  account_number: string;
+  account_name?: string;
+  bank_name?: string;
+  branch_name?: string;
+  routing_number?: string;
+  status: 'pending' | 'approved' | 'rejected';
+  notes?: string;
+  created_at: string;
+  processed_at?: string;
+  approved_at?: string;
+  approved_by?: string;
+  trx_id?: string;
+}
+
 export interface TutorialVideo {
   id: string;
   title: string;
@@ -110,7 +187,7 @@ export interface ManualPaymentSubmission {
   paymentMethod: 'bkash' | 'nagad' | 'rocket';
   accountNumber?: string;
   senderPhone?: string;
-  trxId: string;
+  trxId?: string;
   screenshotUrl?: string;
   couponCode?: string;
   discountBdt?: number;
@@ -965,6 +1042,93 @@ export const apiClient = {
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to upload screenshot');
     return data.url;
+  },
+
+  // 27. Promocodes & Creator Referral System
+  async getUserPromoCodes(userId: string): Promise<UserReferralSummary> {
+    const res = await fetch(`/api/v1/promocodes/user/${encodeURIComponent(userId)}`, {
+      headers: getAuthHeaders({ 'x-user-id': userId }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to load referral promo codes');
+    }
+    return data.summary;
+  },
+
+  async requestNewPromoCode(payload: {
+    userId: string;
+    customCode?: string;
+    discountPercent?: number;
+  }): Promise<{ success: boolean; promoCode: UserPromoCode; message: string }> {
+    const res = await fetch('/api/v1/promocodes/create', {
+      method: 'POST',
+      headers: getAuthHeaders({ 'x-user-id': payload.userId }),
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      const err: any = new Error(data.error || 'Failed to generate referral promo code');
+      err.requiresUpgrade = data.requiresUpgrade;
+      err.currentTier = data.currentTier;
+      throw err;
+    }
+    return data;
+  },
+
+  async applyPromoCode(payload: {
+    code: string;
+    planTier: SubscriptionTier;
+    buyerUserId?: string;
+  }): Promise<ApplyPromoCodeResult> {
+    const res = await fetch('/api/v1/promocodes/apply', {
+      method: 'POST',
+      headers: getAuthHeaders(payload.buyerUserId ? { 'x-user-id': payload.buyerUserId } : undefined),
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Invalid or expired promo code');
+    }
+    return data;
+  },
+
+  // 27b. Referral Earnings Withdrawal System
+  async requestWithdrawal(payload: {
+    userId: string;
+    amountBdt: number;
+    paymentMethod: 'bkash' | 'nagad' | 'rocket' | 'bank';
+    accountNumber: string;
+    accountType?: 'personal' | 'agent' | 'merchant' | 'savings' | 'current';
+    accountName?: string;
+    bankName?: string;
+    branchName?: string;
+    routingNumber?: string;
+    notes?: string;
+  }): Promise<{ success: boolean; withdrawal: WithdrawalRequest; remainingBalanceBdt: number; message: string }> {
+    const res = await fetch('/api/v1/promocodes/withdraw', {
+      method: 'POST',
+      headers: getAuthHeaders({ 'x-user-id': payload.userId }),
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to submit withdrawal request');
+    }
+    return data;
+  },
+
+  async getUserWithdrawals(userId: string): Promise<WithdrawalRequest[]> {
+    try {
+      const res = await fetch(`/api/v1/promocodes/withdrawals/${encodeURIComponent(userId)}`, {
+        headers: getAuthHeaders({ 'x-user-id': userId }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return data.withdrawals || [];
+      }
+    } catch (e) {}
+    return [];
   },
 
   async getPaymentSettings(): Promise<any> {

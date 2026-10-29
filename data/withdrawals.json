@@ -1,0 +1,45 @@
+[
+  {
+    "id": "wth-1793021689119-8507",
+    "user_id": "usr-active-pro-01",
+    "user_email": "pro@streampulse.io",
+    "user_name": "Pro Streamer",
+    "amount_bdt": 500,
+    "payment_method": "bkash",
+    "account_type": "personal",
+    "account_number": "01712345678",
+    "status": "approved",
+    "notes": "Sent via bKash Merchant disbursal",
+    "created_at": "2026-10-26T13:34:49.119Z",
+    "trx_id": "BK20261026001",
+    "approved_at": "2026-10-26T13:52:56.763Z",
+    "processed_at": "2026-10-26T13:52:56.763Z"
+  },
+  {
+    "id": "wth-1792945225488-1317",
+    "user_id": "usr-active-pro-01",
+    "user_email": "pro@streampulse.io",
+    "user_name": "Pro Streamer",
+    "amount_bdt": 800,
+    "payment_method": "bank",
+    "account_number": "151.110.987654",
+    "account_name": "Pro Streamer",
+    "bank_name": "BRAC Bank Ltd",
+    "branch_name": "Gulshan Branch",
+    "status": "rejected",
+    "created_at": "2026-10-25T16:20:25.488Z",
+    "processed_at": "2026-10-26T13:53:07.169Z",
+    "notes": "Bank account name mismatch"
+  },
+  {
+    "id": "wth-1792945216371-9471",
+    "user_id": "usr-active-pro-01",
+    "user_email": "pro@streampulse.io",
+    "user_name": "Pro Streamer",
+    "amount_bdt": 1000,
+    "payment_method": "bkash",
+    "account_number": "01799887766",
+    "status": "pending",
+    "created_at": "2026-10-25T16:20:16.371Z"
+  }
+]

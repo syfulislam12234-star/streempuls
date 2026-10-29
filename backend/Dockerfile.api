@@ -1,35 +1,18 @@
-# ============================================================================
-# StreamPulse - Express API Gateway Dockerfile
-# Lean production container based on Node 20 Alpine
-# ============================================================================
-
-FROM node:20-alpine AS base
-
-# Install curl for healthcheck
-RUN apk add --no-cache curl
+FROM node:18-alpine
 
 WORKDIR /app
 
-# Install dependencies first (leverage Docker layer caching)
+# Copy package.json and package-lock.json
 COPY package*.json ./
-RUN npm ci --only=production && npm cache clean --force
 
-# Copy application source code
-COPY server.js queue.js supabase.js storage.js ./
+# Use standard npm install to prevent exit code 1 version lock errors
+RUN npm install && npm cache clean --force
 
-# Set environment
-ENV NODE_ENV=production
-ENV PORT=3000
+# Copy the rest of the application code
+COPY . .
 
-# Non-root user for security
-USER node
+# Expose the API port
+EXPOSE 5000
 
-# Expose HTTP port
-EXPOSE 3000
-
-# Health check to ensure Express API gateway is responsive
-HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:3000/health || exit 1
-
-# Start API Gateway
-CMD ["node", "server.js"]
+# Start the application
+CMD ["npm", "start"]

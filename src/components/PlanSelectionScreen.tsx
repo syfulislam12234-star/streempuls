@@ -19,6 +19,7 @@ import {
   RefreshCw,
   LogOut,
   MessageCircle,
+  Gift,
 } from 'lucide-react';
 import { apiClient, UserProfile, SubscriptionTier, PaymentRequest } from '../services/apiClient';
 import { LegalTermsModal } from './LegalTermsModal';
@@ -51,6 +52,15 @@ export const PlanSelectionScreen: React.FC<PlanSelectionScreenProps> = ({
   const [localShowLegal, setLocalShowLegal] = useState(false);
   const [localInitialTab, setLocalInitialTab] = useState<'terms' | 'privacy'>('terms');
   const [localInitialSection, setLocalInitialSection] = useState<string | undefined>(undefined);
+  const [urlReferralCode, setUrlReferralCode] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const ref = urlParams.get('ref') || urlParams.get('promo');
+      if (ref) setUrlReferralCode(ref.toUpperCase());
+    } catch {}
+  }, []);
 
   // Autonomous payment requests tracking state
   const [myPaymentRequests, setMyPaymentRequests] = useState<PaymentRequest[]>([]);
@@ -128,6 +138,28 @@ export const PlanSelectionScreen: React.FC<PlanSelectionScreenProps> = ({
 
   return (
     <div className="min-h-[85vh] flex flex-col justify-between py-6 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
+      {/* Referral Partner Discount Banner */}
+      {urlReferralCode && (
+        <div className="mb-6 p-4 rounded-2xl bg-gradient-to-r from-amber-950/60 via-slate-900 to-amber-950/40 border border-amber-500/40 flex items-center justify-between shadow-lg">
+          <div className="flex items-center space-x-3 text-xs text-amber-200">
+            <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+              <Gift className="w-4 h-4" />
+            </div>
+            <div>
+              <p className="font-bold text-white">
+                Partner Referral Discount Activated: <span className="font-mono text-amber-400 bg-amber-950/80 px-2 py-0.5 rounded-lg border border-amber-500/30">{urlReferralCode}</span>
+              </p>
+              <p className="text-slate-300 text-[11px] mt-0.5">
+                Up to 15% discount will be applied automatically to your Creator Pro or Ultra plan at checkout.
+              </p>
+            </div>
+          </div>
+          <span className="hidden sm:inline-block px-3 py-1 rounded-xl bg-amber-500/20 text-amber-300 font-bold text-xs uppercase border border-amber-500/30 shrink-0">
+            Special Offer
+          </span>
+        </div>
+      )}
+
       {/* Account Guard / Plan Management Banner */}
       <div
         className={`mb-8 p-4 sm:p-5 rounded-3xl border shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
@@ -234,7 +266,7 @@ export const PlanSelectionScreen: React.FC<PlanSelectionScreenProps> = ({
                 <div className="flex flex-wrap items-center gap-2">
                   <h4 className="text-sm sm:text-base font-extrabold text-white">Manual Payment Under Review</h4>
                   <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 font-mono border border-amber-500/30">
-                    TrxID: {pendingPayment.trx_id}
+                    {pendingPayment.sender_phone ? `Sender: ${pendingPayment.sender_phone}` : `Ref: ${pendingPayment.trx_id}`}
                   </span>
                   <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 font-mono border border-emerald-500/30 capitalize">
                     {pendingPayment.payment_method}
@@ -257,7 +289,7 @@ export const PlanSelectionScreen: React.FC<PlanSelectionScreenProps> = ({
                 </span>
               </div>
               <a
-                href={`https://wa.me/8801712345678?text=${encodeURIComponent(`Hello StreamPulse Support, checking on my manual payment status for ${pendingPayment.plan_tier.toUpperCase()} Plan (TrxID: ${pendingPayment.trx_id})`)}`}
+                href={`https://wa.me/8801712345678?text=${encodeURIComponent(`Hello StreamPulse Support, checking on my manual payment status for ${pendingPayment.plan_tier.toUpperCase()} Plan (${pendingPayment.sender_phone ? `Sender: ${pendingPayment.sender_phone}` : `Ref: ${pendingPayment.trx_id}`})`)}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="w-full sm:w-auto flex items-center justify-center space-x-1.5 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs text-white font-bold transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] cursor-pointer shadow-md shadow-emerald-950/60"

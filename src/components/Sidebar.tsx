@@ -14,6 +14,7 @@ import {
   Settings,
   Mail,
   CreditCard,
+  Gift,
 } from 'lucide-react';
 import { UserProfile } from '../services/apiClient';
 import logoImg from '../assets/images/streampulse_logo_1791782499836.jpg';
@@ -33,6 +34,7 @@ export interface SidebarProps {
   onOpenCreateModal: () => void;
   onOpenPlanModal: () => void;
   onOpenAuthModal: () => void;
+  onOpenReferralModal?: () => void;
   onOpenTutorials?: () => void;
   onOpenNotificationsModal?: () => void;
   onOpenGmail?: () => void;
@@ -53,6 +55,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenCreateModal,
   onOpenPlanModal,
   onOpenAuthModal,
+  onOpenReferralModal,
   onOpenTutorials,
   onOpenNotificationsModal,
   onOpenGmail,
@@ -85,6 +88,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
       isActive: isPlanModalOpen,
       onClick: () => {
         onOpenPlanModal();
+        onCloseMobile();
+      },
+    },
+    {
+      id: 'referrals',
+      label: 'Refer & Earn',
+      icon: Gift,
+      badge: (currentUser?.reward_credits_bdt ?? 0) > 0 ? `${currentUser?.reward_credits_bdt} BDT` : 'Earn BDT',
+      badgeColor: 'text-amber-400 bg-amber-950/60 border border-amber-500/30',
+      isActive: false,
+      onClick: () => {
+        if (onOpenReferralModal) onOpenReferralModal();
         onCloseMobile();
       },
     },
