@@ -6,11 +6,17 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { streamQueue, redisClient } from './queue.js';
 import { supabase } from './supabase.js';
 import { getStorageProvider, STORAGE_PROVIDER } from './storage.js';
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -18,6 +24,23 @@ const PORT = process.env.PORT || 4000;
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Locate production React/Vite build directory (dist)
+const candidateDistPaths = [
+  path.resolve(process.cwd(), 'dist'),
+  path.resolve(__dirname, '../dist'),
+  path.resolve(__dirname, 'dist'),
+];
+export const distPath = candidateDistPaths.find(
+  (p) => fs.existsSync(p) && fs.existsSync(path.join(p, 'index.html'))
+);
+
+if (distPath) {
+  console.log(`[StreamPulse UI] Serving production frontend from: ${distPath}`);
+  app.use(express.static(distPath, { maxAge: '1d' }));
+} else {
+  console.log('[StreamPulse UI] No dist folder found; running in standalone API mode.');
+}
 
 // ----------------------------------------------------------------------------
 // Health Check Endpoint (Resilient for Docker, Coolify & Orchestration Probes)
@@ -71,10 +94,15 @@ app.head('/health', (_req, res) => res.status(200).end());
 app.head('/healthz', (_req, res) => res.status(200).end());
 
 // ----------------------------------------------------------------------------
-// Root Route (GET /) - Welcome & API Service Status
-// Prevents "Cannot GET /" and provides immediate operational verification
+// Root Route (GET /) - StreamPulse React UI & Operational Status
+// Serves interactive client dashboard when dist/ is built, or JSON/HTML fallback
 // ----------------------------------------------------------------------------
 app.get('/', (req, res) => {
+  // If production React frontend is built, serve full interactive UI!
+  if (distPath && (!req.headers.accept || !req.headers.accept.includes('application/json'))) {
+    return res.sendFile(path.join(distPath, 'index.html'));
+  }
+
   // If JSON is requested (curl or API clients)
   if (req.headers.accept && req.headers.accept.includes('application/json')) {
     return res.status(200).json({
@@ -565,6 +593,24 @@ app.post('/api/admin/scale', async (req, res) => {
     console.error('[API Gateway Scale Error]', error);
     return res.status(500).json({ success: false, error: error.message });
   }
+});
+
+// ----------------------------------------------------------------------------
+// Client-Side Routing Fallback (SPA Browser Navigation)
+// Routes /live-studio, /billing, /channels, etc. to index.html without breaking /api
+// ----------------------------------------------------------------------------
+app.get('*', (req, res, next) => {
+  if (
+    req.path.startsWith('/api') ||
+    req.path.startsWith('/health') ||
+    req.path.startsWith('/ws')
+  ) {
+    return next();
+  }
+  if (distPath) {
+    return res.sendFile(path.join(distPath, 'index.html'));
+  }
+  return res.redirect('/');
 });
 
 // Start Express Listener

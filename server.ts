@@ -19,10 +19,14 @@ import {
   getStorageHealthStatus,
   type StorageProviderType,
 } from './src/services/storageProvider.ts';
+import { fileURLToPath } from 'url';
 import {
   clusterRegistry,
   TIER_RESOURCE_PROFILES,
 } from './src/services/clusterManager.ts';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
@@ -5001,18 +5005,35 @@ app.post('/api/cluster/auto-scale/evaluate', (_req, res) => {
 // ----------------------------------------------------------------------------
 async function startServer() {
   try {
-    if (process.env.NODE_ENV !== 'production') {
+    if (process.env.NODE_ENV !== 'production' && process.env.APPLET_ID) {
       const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: 'spa',
       });
       app.use(vite.middlewares);
     } else {
-      const distPath = path.resolve(process.cwd(), 'dist');
-      const indexPath = path.join(distPath, 'index.html');
-      if (fs.existsSync(distPath) && fs.existsSync(indexPath)) {
-        app.use(express.static(distPath));
-        app.get('*', (_req, res) => {
+      const candidateDistPaths = [
+        path.resolve(process.cwd(), 'dist'),
+        path.resolve(__dirname, 'dist'),
+        path.resolve(__dirname, '../dist'),
+      ];
+      const distPath = candidateDistPaths.find(
+        (p) => fs.existsSync(p) && fs.existsSync(path.join(p, 'index.html'))
+      );
+
+      if (distPath) {
+        const indexPath = path.join(distPath, 'index.html');
+        console.log(`[StreamPulse Frontend] Serving production UI from: ${distPath}`);
+        app.use(express.static(distPath, { maxAge: '1d' }));
+
+        app.get('*', (req, res, next) => {
+          if (
+            req.path.startsWith('/api') ||
+            req.path.startsWith('/health') ||
+            req.path.startsWith('/ws')
+          ) {
+            return next();
+          }
           res.sendFile(indexPath);
         });
       } else {
