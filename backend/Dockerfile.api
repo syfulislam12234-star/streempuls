@@ -1,4 +1,4 @@
-FROM node:18-alpine
+FROM node:22-alpine
 
 # Install curl and ca-certificates for reliable healthcheck probes
 RUN apk add --no-cache curl ca-certificates
@@ -8,13 +8,13 @@ WORKDIR /app
 # Copy package.json and package-lock.json
 COPY package*.json ./
 
-# Use standard npm install to prevent exit code 1 version lock errors
-RUN npm install && npm cache clean --force
+# Install backend dependencies
+RUN npm install
 
-# Copy the rest of the application code
+# Copy all files including pre-synced dist/ folder
 COPY . .
 
-# Expose the API port
+# Expose the API and UI port
 EXPOSE 4000
 
 # Resilient Docker Healthcheck: Alpine wget fallback + curl with generous start-period

@@ -43,7 +43,7 @@ services:
   # --------------------------------------------------------------------------
   backend-api:
     build:
-      context: ./backend
+      context: .
       dockerfile: Dockerfile.api
     container_name: streampulse-api
     restart: on-failure
