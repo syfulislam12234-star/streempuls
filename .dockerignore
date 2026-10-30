@@ -1,0 +1,14 @@
+node_modules/
+npm-debug.log*
+.env
+.env.*
+.git/
+.github/
+Dockerfile*
+docker-compose*
+docker-compose.override*
+.dockerignore
+README*
+dist/
+build/
+*.log

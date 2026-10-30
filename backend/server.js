@@ -57,6 +57,11 @@ if (mountedCount === 0) {
   console.log('[StreamPulse UI] Notice: dist folder not yet created; will be resolved dynamically on build completion.');
 }
 
+// Resolve the production dist directory for SPA client-side routing fallback.
+// getDistIndexPath() scans candidateDistPaths and returns { distDir, indexPath } or null.
+const distInfo = getDistIndexPath();
+const distPath = distInfo ? distInfo.distDir : null;
+
 // ----------------------------------------------------------------------------
 // Health Check Endpoint (Resilient for Docker, Coolify & Orchestration Probes)
 // Always returns HTTP 200 OK when Express is alive and accepting connections
