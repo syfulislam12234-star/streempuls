@@ -18,8 +18,7 @@ services:
       --appendonly yes 
       --maxmemory 1024mb 
       --maxmemory-policy allkeys-lru
-    ports:
-      - "127.0.0.1:6379:6379"
+    ports:        # Removed host port mapping - Redis only accessible via internal Docker network
     volumes:
       - redis-data:/data
     networks:
