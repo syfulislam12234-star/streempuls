@@ -12,6 +12,7 @@ RUN npm install --legacy-peer-deps --no-audit --no-fund
 
 # Copy frontend source and build production static assets into /app/dist
 COPY vite.config.ts index.html ./
+COPY firebase-applet-config.json ./
 COPY src ./src
 RUN npm run build
 
