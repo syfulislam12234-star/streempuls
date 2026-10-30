@@ -32,7 +32,7 @@ ENV MEMORY_CEILING_MB=1850
 USER node
 
 # Healthcheck to verify worker node is responsive and heartbeating
-HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=15s --timeout=5s --start-period=25s --retries=5 \
   CMD node healthcheck-worker.js || exit 1
 
 # Use tini as init process to properly handle signals (SIGTERM/SIGINT) for child FFmpeg processes

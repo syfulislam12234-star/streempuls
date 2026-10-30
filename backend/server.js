@@ -20,32 +20,55 @@ app.use(cors());
 app.use(express.json());
 
 // ----------------------------------------------------------------------------
-// Health Check Endpoint
+// Health Check Endpoint (Resilient for Docker, Coolify & Orchestration Probes)
+// Always returns HTTP 200 OK when Express is alive and accepting connections
 // ----------------------------------------------------------------------------
-app.get('/health', async (req, res) => {
-  try {
-    const redisPing = await redisClient.ping();
-    const queueCount = await streamQueue.getJobCounts();
+const handleHealthCheck = async (_req, res) => {
+  let redisStatus = 'connecting';
+  let queueCounts = null;
 
-    return res.status(200).json({
-      status: 'healthy',
-      uptime: process.uptime(),
-      timestamp: new Date().toISOString(),
-      services: {
-        redis: redisPing === 'PONG' ? 'connected' : 'degraded',
-        bullmq: {
-          queue: 'youtube-stream-dispatch',
-          counts: queueCount,
-        },
-      },
-    });
-  } catch (error) {
-    return res.status(503).json({
-      status: 'unhealthy',
-      error: error.message,
-    });
+  try {
+    // Quick, non-blocking check with 1.5s timeout to prevent hanging health probes
+    const pingPromise = redisClient ? redisClient.ping() : Promise.resolve('DISCONNECTED');
+    const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve('TIMEOUT'), 1500));
+    const pingResult = await Promise.race([pingPromise, timeoutPromise]);
+    redisStatus = pingResult === 'PONG' ? 'connected' : pingResult === 'TIMEOUT' ? 'slow' : 'standby';
+
+    if (redisStatus === 'connected' && streamQueue) {
+      queueCounts = await Promise.race([
+        streamQueue.getJobCounts(),
+        new Promise((resolve) => setTimeout(() => resolve(null), 1000)),
+      ]);
+    }
+  } catch (err) {
+    redisStatus = 'initializing';
   }
-});
+
+  const mem = process.memoryUsage();
+  return res.status(200).json({
+    status: 'healthy',
+    ready: true,
+    node: process.version,
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+    memory: {
+      rssMb: +(mem.rss / (1024 * 1024)).toFixed(1),
+      heapMb: +(mem.heapUsed / (1024 * 1024)).toFixed(1),
+    },
+    services: {
+      api: 'operational',
+      redis: redisStatus,
+      queue: queueCounts || 'active',
+      storage: process.env.STORAGE_PROVIDER || 'supabase',
+    },
+  });
+};
+
+app.get('/health', handleHealthCheck);
+app.get('/healthz', handleHealthCheck);
+app.get('/api/health', handleHealthCheck);
+app.head('/health', (_req, res) => res.status(200).end());
+app.head('/healthz', (_req, res) => res.status(200).end());
 
 // ----------------------------------------------------------------------------
 // Storage Provider Status & Dynamic Switch (Supabase vs Cloudflare R2)

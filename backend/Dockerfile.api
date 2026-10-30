@@ -1,5 +1,8 @@
 FROM node:18-alpine
 
+# Install curl and ca-certificates for reliable healthcheck probes
+RUN apk add --no-cache curl ca-certificates
+
 WORKDIR /app
 
 # Copy package.json and package-lock.json
@@ -13,6 +16,10 @@ COPY . .
 
 # Expose the API port
 EXPOSE 4000
+
+# Resilient Docker Healthcheck: Alpine wget fallback + curl with generous start-period
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
+  CMD wget -q -O - http://127.0.0.1:4000/health > /dev/null || curl -fs http://127.0.0.1:4000/health > /dev/null || exit 1
 
 # Start the application
 CMD ["npm", "start"]

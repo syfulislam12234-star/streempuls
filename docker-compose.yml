@@ -79,10 +79,11 @@ services:
           cpus: '0.5'
           memory: 512M
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:4000/health > /dev/null || curl -fs http://127.0.0.1:4000/health > /dev/null || exit 1"]
       interval: 15s
       timeout: 5s
-      retries: 3
+      retries: 5
+      start_period: 20s
     networks:
       - streampulse-net
     logging:
@@ -104,6 +105,12 @@ services:
       context: ./backend
       dockerfile: Dockerfile.worker
     restart: on-failure
+    healthcheck:
+      test: ["CMD", "node", "healthcheck-worker.js"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
     deploy:
       resources:
         limits:

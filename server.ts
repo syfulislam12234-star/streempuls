@@ -4673,13 +4673,15 @@ app.post('/api/admin/payment-requests/:id/reject', requireAdmin, async (req, res
   }
 });
 
-// 9. GET /api/health (System Metrics & Health)
-app.get('/api/health', (_req, res) => {
+// 9. GET /health, /healthz, /api/health (System Metrics & Resilient Probes for Coolify & Docker)
+const handleSystemHealth = (_req: express.Request, res: express.Response) => {
   const mem = process.memoryUsage();
   const currentStorage = getStorageProvider();
   return res.status(200).json({
     status: 'healthy',
-    uptime: process.uptime(),
+    ready: true,
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
     activeWorkersCount: activeWorkerProcesses.size,
     maxConcurrentStreamsPerNode: 10,
     supabaseConnected: isSupabaseConfigured,
@@ -4691,7 +4693,13 @@ app.get('/api/health', (_req, res) => {
       heapUsedMb: +(mem.heapUsed / (1024 * 1024)).toFixed(1),
     },
   });
-});
+};
+
+app.get('/health', handleSystemHealth);
+app.get('/healthz', handleSystemHealth);
+app.get('/api/health', handleSystemHealth);
+app.head('/health', (_req, res) => res.status(200).end());
+app.head('/healthz', (_req, res) => res.status(200).end());
 
 // ----------------------------------------------------------------------------
 // Automated Subscription Expiry & Renewal Notification Background Worker

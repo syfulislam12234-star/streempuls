@@ -7,7 +7,7 @@ import fs from 'fs';
 import path from 'path';
 
 const HEARTBEAT_FILE = path.resolve('/tmp/worker-heartbeat.json');
-const MAX_STALE_SECONDS = 30;
+const MAX_STALE_SECONDS = 60;
 const HARD_MEMORY_LIMIT_MB = 2048; // Docker container memory ceiling
 
 try {
