@@ -13,7 +13,7 @@ import { getStorageProvider, STORAGE_PROVIDER } from './storage.js';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 8000;
+const PORT = process.env.PORT || 4000;
 
 // Middleware
 app.use(cors());

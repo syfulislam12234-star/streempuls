@@ -39,7 +39,7 @@ const app = express();
 const server = http.createServer(app);
 const PORT = process.env.APPLET_ID
   ? 3000
-  : parseInt(process.env.PORT || '8000', 10);
+  : parseInt(process.env.PORT || '4000', 10);
 const HOST = '0.0.0.0';
 
 server.on('error', (err: any) => {
