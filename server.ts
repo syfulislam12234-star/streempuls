@@ -37,7 +37,9 @@ process.on('unhandledRejection', (reason, promise) => {
 
 const app = express();
 const server = http.createServer(app);
-const PORT = parseInt(process.env.PORT || '3000', 10);
+const PORT = process.env.APPLET_ID
+  ? 3000
+  : parseInt(process.env.PORT || '8000', 10);
 const HOST = '0.0.0.0';
 
 server.on('error', (err: any) => {
