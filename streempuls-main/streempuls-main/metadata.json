@@ -1,0 +1,6 @@
+{
+  "name": "StreamPulse - 24/7 YouTube Live SaaS Architecture",
+  "description": "Production-ready 24/7 YouTube Live Streaming SaaS control engine with Supabase SQL DDL, 1-Click Admin Dynamic Scaling, BullMQ workers, and FFmpeg direct-copy telemetry.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

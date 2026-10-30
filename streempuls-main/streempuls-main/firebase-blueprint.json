@@ -1,0 +1,64 @@
+{
+  "entities": {
+    "users": {
+      "title": "User Profile",
+      "description": "User account profile and subscription tier status",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["user", "admin"] },
+        "subscription_tier": { "type": "string", "enum": ["free", "basic", "pro", "business"] },
+        "subscription_status": { "type": "string", "enum": ["active", "pending", "unpaid", "expired", "cancelled"] },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "email", "role"]
+    },
+    "streams": {
+      "title": "Broadcast Stream",
+      "description": "24/7 Live streaming job configuration and telemetry",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "video_url": { "type": "string" },
+        "status": { "type": "string", "enum": ["idle", "live", "error", "starting", "reconnecting", "stopping"] },
+        "loop_enabled": { "type": "boolean" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "userId", "title", "status"]
+    },
+    "systemSettings": {
+      "title": "System Settings",
+      "description": "Platform global payment and legal configurations",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "bkash_personal": { "type": "string" },
+        "bkash_merchant": { "type": "string" },
+        "nagad_personal": { "type": "string" },
+        "nagad_merchant": { "type": "string" },
+        "rocket_personal": { "type": "string" },
+        "rocket_merchant": { "type": "string" },
+        "whatsapp_number": { "type": "string" },
+        "updated_at": { "type": "string" }
+      },
+      "required": ["id"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "users",
+      "description": "User profiles indexed by UID"
+    },
+    "/streams/{streamId}": {
+      "schema": "streams",
+      "description": "Active and scheduled live streams"
+    },
+    "/system_settings/{settingId}": {
+      "schema": "systemSettings",
+      "description": "Global settings and configuration documents"
+    }
+  }
+}

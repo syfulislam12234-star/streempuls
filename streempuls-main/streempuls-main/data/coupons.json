@@ -1,0 +1,46 @@
+[
+  {
+    "id": "cpn-pulse20",
+    "code": "PULSE20",
+    "discount_type": "percent",
+    "discount_value": 20,
+    "applicable_tiers": [
+      "basic",
+      "pro",
+      "business"
+    ],
+    "max_uses": 1000,
+    "times_used": 14,
+    "is_active": true,
+    "created_at": "2026-10-25T16:07:10.029Z"
+  },
+  {
+    "id": "cpn-creator500",
+    "code": "CREATOR500",
+    "discount_type": "fixed_bdt",
+    "discount_value": 500,
+    "applicable_tiers": [
+      "basic",
+      "pro",
+      "business"
+    ],
+    "max_uses": 500,
+    "times_used": 28,
+    "is_active": true,
+    "created_at": "2026-10-25T16:07:10.029Z"
+  },
+  {
+    "id": "cpn-vip30",
+    "code": "VIP30",
+    "discount_type": "percent",
+    "discount_value": 30,
+    "applicable_tiers": [
+      "pro",
+      "business"
+    ],
+    "max_uses": 200,
+    "times_used": 8,
+    "is_active": true,
+    "created_at": "2026-10-25T16:07:10.029Z"
+  }
+]

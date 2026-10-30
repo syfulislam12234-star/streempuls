@@ -1,0 +1,39 @@
+{
+  "name": "streampulse-backend",
+  "version": "1.0.0",
+  "description": "Production-ready 24/7 YouTube Live Streaming SaaS API Gateway & BullMQ Worker Engine",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "worker": "node worker.js",
+    "worker:dev": "node --watch worker.js"
+  },
+  "keywords": [
+    "youtube-streaming",
+    "ffmpeg",
+    "bullmq",
+    "redis",
+    "supabase",
+    "express"
+  ],
+  "author": "Principal Cloud Architect",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "bullmq": "^5.41.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "ioredis": "^5.5.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.9"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

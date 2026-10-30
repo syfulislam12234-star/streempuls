@@ -1,0 +1,74 @@
+[
+  {
+    "id": "57d381b7-92aa-4a45-b7c2-b76f9b94291d",
+    "user_id": "usr-admin-01",
+    "title": "⚡ PRO Plan Activated Autonomously!",
+    "message": "Your payment of 4000 BDT via BKASH (Receipt Attached & Sender: 01799887766) was verified automatically by the Autonomous Gateway Engine. 24/7 continuous cloud streaming is now unlocked!",
+    "type": "system",
+    "is_read": false,
+    "created_at": "2026-10-27T15:11:35.675Z"
+  },
+  {
+    "id": "notif-1793022787169",
+    "user_id": "usr-active-pro-01",
+    "title": "Payout Request Declined",
+    "message": "Your withdrawal of ৳800 BDT via BANK was declined: Bank account name mismatch. ৳800 BDT has been refunded back to your available balance.",
+    "type": "system",
+    "is_read": false,
+    "created_at": "2026-10-26T13:53:07.169Z"
+  },
+  {
+    "id": "notif-1793022776763",
+    "user_id": "usr-active-pro-01",
+    "title": "Payout Request Approved!",
+    "message": "Your withdrawal of ৳500 BDT via BKASH (01712345678) has been approved and sent! (TrxID: BK20261026001)",
+    "type": "referral_reward",
+    "is_read": false,
+    "created_at": "2026-10-26T13:52:56.769Z"
+  },
+  {
+    "id": "notif-1793022765173",
+    "user_id": "usr-unpaid-test-01",
+    "title": "Subscription Plan Updated",
+    "message": "Your account subscription plan has been set to PRO (ACTIVE) by Platform Administration.",
+    "type": "system",
+    "is_read": false,
+    "created_at": "2026-10-26T13:52:45.173Z"
+  },
+  {
+    "id": "notif-1793021689120",
+    "user_id": "usr-active-pro-01",
+    "title": "Withdrawal Request Submitted",
+    "message": "Your payout request of 500 BDT via BKASH (01712345678) has been submitted and is pending verification.",
+    "type": "system",
+    "is_read": false,
+    "created_at": "2026-10-26T13:34:49.128Z"
+  },
+  {
+    "id": "notif-1792945225488",
+    "user_id": "usr-active-pro-01",
+    "title": "Withdrawal Request Submitted",
+    "message": "Your payout request of 800 BDT via BANK (151.110.987654) has been submitted and is pending verification.",
+    "type": "system",
+    "is_read": false,
+    "created_at": "2026-10-25T16:20:25.488Z"
+  },
+  {
+    "id": "notif-1792945216371",
+    "user_id": "usr-active-pro-01",
+    "title": "Withdrawal Request Submitted",
+    "message": "Your payout request of 1,000 BDT via BKASH (01799887766) has been submitted and is pending verification.",
+    "type": "system",
+    "is_read": false,
+    "created_at": "2026-10-25T16:20:16.371Z"
+  },
+  {
+    "id": "65f3e0d4-0d05-4f68-bb6c-15d0bb1d7dd3",
+    "user_id": "usr-unpaid-test-01",
+    "title": "🎉 Free Trial Activated",
+    "message": "Your FREE plan is active for 3 days. Automated broadcasting studio unlocked!",
+    "type": "system",
+    "is_read": false,
+    "created_at": "2026-10-25T16:07:57.541Z"
+  }
+]

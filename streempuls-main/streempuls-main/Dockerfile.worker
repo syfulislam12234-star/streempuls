@@ -1,0 +1,42 @@
+# ============================================================================
+# StreamPulse - Isolated FFmpeg 24/7 Streaming Worker Dockerfile
+# Lean Node 22 Alpine container equipped with FFmpeg & Tini init system
+# ============================================================================
+
+FROM node:22-alpine AS base
+
+# Install FFmpeg, ca-certificates, and tini (for proper signal forwarding to child processes)
+RUN apk add --no-cache \
+    ffmpeg \
+    ca-certificates \
+    tini \
+    curl
+
+WORKDIR /app
+
+# Install dependencies (leverage Docker layer caching)
+COPY backend/package*.json ./
+RUN npm install && npm cache clean --force
+
+# Copy worker application source files
+COPY backend/worker.js backend/queue.js backend/supabase.js backend/storage.js backend/healthcheck-worker.js ./
+
+# Set environment
+ENV NODE_ENV=production
+ENV QUEUE_NAME=streaming-queue
+ENV MAX_CONCURRENT_STREAMS=10
+ENV MAX_RESTART_RETRIES=5
+ENV MEMORY_CEILING_MB=1850
+
+# Non-root user for security (ensure user has permissions to execute ffmpeg)
+USER node
+
+# Healthcheck to verify worker node is responsive and heartbeating
+HEALTHCHECK --interval=15s --timeout=5s --start-period=25s --retries=5 \
+  CMD node healthcheck-worker.js || exit 1
+
+# Use tini as init process to properly handle signals (SIGTERM/SIGINT) for child FFmpeg processes
+ENTRYPOINT ["/sbin/tini", "--"]
+
+# Start BullMQ isolated streaming worker
+CMD ["node", "worker.js"]

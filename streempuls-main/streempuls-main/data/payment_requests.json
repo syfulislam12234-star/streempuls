@@ -1,0 +1,39 @@
+[
+  {
+    "id": "68e04095-9fa7-4f3e-a066-1b110a87f3c9",
+    "user_id": "usr-admin-01",
+    "user_email": "admin@streampulse.io",
+    "user_name": "Cluster Administrator",
+    "plan_tier": "pro",
+    "amount_bdt": 4000,
+    "payment_method": "bkash",
+    "account_number": "01712-345678",
+    "sender_phone": "01799887766",
+    "trx_id": "RCPT-BKA-MVQTPSSB-719",
+    "screenshot_url": "/uploads/proof_test.png",
+    "status": "approved",
+    "approved_at": "2026-10-27T15:11:35.675Z",
+    "approved_by": "system_autonomous_engine",
+    "discount_bdt": 0,
+    "created_at": "2026-10-27T15:11:35.675Z",
+    "updated_at": "2026-10-27T15:11:35.675Z"
+  },
+  {
+    "id": "pay-sample-01",
+    "user_id": "usr-unpaid-test-01",
+    "user_email": "newuser@streampulse.io",
+    "user_name": "New Streamer",
+    "plan_tier": "pro",
+    "amount_bdt": 4000,
+    "payment_method": "bkash",
+    "account_number": "01712-345678",
+    "sender_phone": "01711-223344",
+    "trx_id": "BK92X8L41M",
+    "screenshot_url": "https://images.unsplash.com/photo-1559526324-4b87b5e36e44?w=600&auto=format&fit=crop&q=80",
+    "status": "approved",
+    "created_at": "2026-10-27T14:18:53.641Z",
+    "updated_at": "2026-10-27T14:18:53.641Z",
+    "approved_at": "2026-10-27T14:43:53.641Z",
+    "approved_by": "system_autonomous_engine"
+  }
+]

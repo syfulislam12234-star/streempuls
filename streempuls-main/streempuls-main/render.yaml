@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: streampulse-cloud
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: STORAGE_PROVIDER
+        value: supabase

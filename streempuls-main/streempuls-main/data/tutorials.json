@@ -1,0 +1,54 @@
+[
+  {
+    "id": "tut-001",
+    "title": "How to Start 24/7 YouTube Live Streams on StreamPulse",
+    "description": "Step-by-step masterclass covering stream key generation, selecting MP4 loops, and configuring 24/7 continuous broadcast servers.",
+    "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "youtube_id": "dQw4w9WgXcQ",
+    "category": "getting_started",
+    "duration_minutes": 8,
+    "thumbnail_url": "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?w=800&auto=format&fit=crop&q=60",
+    "created_by": "StreamPulse Admin",
+    "created_at": "2026-10-05T05:59:43.673Z",
+    "updated_at": "2026-10-05T05:59:43.673Z"
+  },
+  {
+    "id": "tut-002",
+    "title": "YouTube Live Studio & RTMP Stream Key Setup Guide",
+    "description": "Learn where to locate your YouTube RTMP ingest server URL and primary stream key, enable low latency mode, and prevent disconnections.",
+    "video_url": "https://www.youtube.com/watch?v=L_LUpnjgPso",
+    "youtube_id": "L_LUpnjgPso",
+    "category": "youtube_setup",
+    "duration_minutes": 5,
+    "thumbnail_url": "https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=800&auto=format&fit=crop&q=60",
+    "created_by": "StreamPulse Admin",
+    "created_at": "2026-10-07T05:59:43.673Z",
+    "updated_at": "2026-10-07T05:59:43.673Z"
+  },
+  {
+    "id": "tut-003",
+    "title": "Direct-Copy Zero CPU Mode vs Cloud Transcoding Explained",
+    "description": "How to format your MP4 video files with H.264 + AAC to stream with 0% CPU transcoding overhead and zero audio buffering lag.",
+    "video_url": "https://www.youtube.com/watch?v=fJ9rUzIMcZQ",
+    "youtube_id": "fJ9rUzIMcZQ",
+    "category": "pro_tips",
+    "duration_minutes": 6,
+    "thumbnail_url": "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?w=800&auto=format&fit=crop&q=60",
+    "created_by": "StreamPulse Admin",
+    "created_at": "2026-10-09T05:59:43.673Z",
+    "updated_at": "2026-10-09T05:59:43.673Z"
+  },
+  {
+    "id": "tut-004",
+    "title": "Fixing YouTube Stream Key Revocations & Reconnecting Broadcasts",
+    "description": "What to do when YouTube Live interrupts your broadcast, how auto-reconnect works, and how to update live keys without downtime.",
+    "video_url": "https://www.youtube.com/watch?v=9bZkp7q19f0",
+    "youtube_id": "9bZkp7q19f0",
+    "category": "troubleshooting",
+    "duration_minutes": 4,
+    "thumbnail_url": "https://images.unsplash.com/photo-1550751827-4bd374c3f58b?w=800&auto=format&fit=crop&q=60",
+    "created_by": "StreamPulse Admin",
+    "created_at": "2026-10-11T05:59:43.673Z",
+    "updated_at": "2026-10-11T05:59:43.673Z"
+  }
+]

@@ -1,0 +1,48 @@
+# ============================================================================
+# StreamPulse - Full-Stack (React/Vite UI + Express API) Dockerfile
+# ============================================================================
+# Stage 1: Build the React/Vite frontend
+FROM node:22-alpine AS frontend-builder
+
+WORKDIR /app
+
+# Install frontend dependencies (package-lock.json pinned for reproducibility)
+COPY package.json package-lock.json ./
+RUN npm install --legacy-peer-deps --no-audit --no-fund
+
+# Copy frontend source and build production static assets into /app/dist
+COPY vite.config.ts index.html ./
+COPY firebase-applet-config.json ./
+COPY src ./src
+RUN npm run build
+
+# ----------------------------------------------------------------------------
+# Stage 2: Runtime — Express API serves backend routes + built frontend UI
+# ----------------------------------------------------------------------------
+FROM node:22-alpine
+
+# Runtime tools: curl + ca-certificates for healthcheck probes (TLS).
+# busybox already ships wget on Alpine, used as the healthcheck fallback.
+RUN apk add --no-cache curl ca-certificates
+
+WORKDIR /app
+
+# Install backend dependencies (deterministic via package-lock.json)
+COPY backend/package.json backend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+# Copy built frontend from the builder stage
+COPY --from=frontend-builder /app/dist ./dist
+
+# Copy backend application source
+COPY backend/ ./backend/
+
+# Expose the API and UI port
+EXPOSE 4000
+
+# Resilient healthcheck: busybox wget primary, curl fallback.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
+  CMD wget -q -O - http://127.0.0.1:4000/health > /dev/null || curl -fs http://127.0.0.1:4000/health > /dev/null || exit 1
+
+# Start the Express API gateway (serves /api routes + static UI from /app/dist + SPA fallback)
+CMD ["node", "backend/server.js"]
