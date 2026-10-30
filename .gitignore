@@ -4,5 +4,5 @@ coverage/
 *.log
 .env*
 !.env.example
-!dist/
-!backend/dist/
+dist/
+backend/dist/
