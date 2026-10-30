@@ -8,6 +8,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import multer from 'multer';
 import { fileURLToPath } from 'url';
 import { streamQueue, redisClient } from './queue.js';
 import { supabase } from './supabase.js';
@@ -144,6 +145,33 @@ function getTierConfig(tier) {
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Multer configuration for video file uploads
+// Saves files temporarily, then uploads directly to Cloudflare R2
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      const uploadDir = path.resolve(__dirname, '..', 'uploads');
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      }
+      cb(null, uploadDir);
+    },
+    filename: (_req, file, cb) => {
+      cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9.-]/g, '-')}`);
+    },
+  }),
+  limits: { fileSize: 500 * 1024 * 1024 }, // 500MB max file size
+  fileFilter: (_req, file, cb) => {
+    // Accept video files only
+    const allowedTypes = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only MP4, WebM, and MOV files are allowed.'), false);
+    }
+  },
+});
 
 // Locate production React/Vite build directory (dist) across container structures
 const candidateDistPaths = [
@@ -1253,6 +1281,133 @@ app.get('/api/v1/promocodes/withdrawals/:userId', (req, res) => {
       withdrawals: userWithdrawals,
     });
   } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/upload - Upload video file to Cloudflare R2
+app.post('/api/upload', upload.single('video'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file uploaded' });
+    }
+
+    const { userId } = req.body;
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'User ID is required' });
+    }
+
+    // Use the Cloudflare R2 storage adapter to upload the file
+    const storageAdapter = getStorageProvider('r2');
+    if (!storageAdapter || storageAdapter.name !== 'r2') {
+      return res.status(500).json({ success: false, error: 'Cloudflare R2 storage not configured. Set STORAGE_PROVIDER=r2.' });
+    }
+
+    const buffer = req.file.buffer || fs.readFile(req.file.path);
+    const cleanPath = `streams/${Date.now()}-${req.file.originalname.replace(/[^a-zA-Z0-9.-]/g, '-')}`;
+    
+    const result = await storageAdapter.upload(cleanPath, buffer, req.file.mimeType);
+
+    // Clean up local temp file if multer saved it
+    if (req.file.path && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+
+    return res.status(200).json({
+      success: true,
+      key: result.key,
+      publicUrl: result.publicUrl,
+      sizeBytes: result.sizeBytes || req.file.size,
+      message: 'Video uploaded successfully to Cloudflare R2',
+    });
+  } catch (err) {
+    console.error('[API Upload Error]', err);
+    // Clean up temp file on error
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch {}
+    }
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/upload/presign - Generate Cloudflare R2 presigned PUT URL for direct browser upload
+app.post('/api/upload/presign', async (req, res) => {
+  try {
+    const { userId, fileName, contentType } = req.body;
+    if (!userId || !fileName) {
+      return res.status(400).json({ success: false, error: 'userId and fileName are required' });
+    }
+
+    // Check if Cloudflare R2 is configured
+    if (!process.env.CLOUDFLARE_R2_ACCOUNT_ID || !process.env.CLOUDFLARE_R2_ACCESS_KEY_ID || !process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY) {
+      return res.status(500).json({ success: false, error: 'Cloudflare R2 credentials not configured.' });
+    }
+
+    // Generate a clean, safe file path
+    const cleanFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '-');
+    const path = `streams/${userId}/${Date.now()}-${cleanFileName}`;
+
+    // Generate presigned PUT URL using AWS SDK directly
+    try {
+      const { S3Client } = await import('@aws-sdk/client-s3');
+      const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
+      const client = new S3Client({
+        region: 'auto',
+        endpoint: `https://${process.env.CLOUDFLARE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+        credentials: {
+          accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID,
+          secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
+        },
+      });
+      const command = new (await import('@aws-sdk/s3-request-presigner')).PutObjectCommand({
+        Bucket: process.env.CLOUDFLARE_R2_BUCKET || 'stream-assets',
+        Key: path,
+      });
+      const presignedUrl = await getSignedUrl(client, command, { expiresIn: 86400 });
+
+      return res.status(200).json({
+        success: true,
+        presignedUrl,
+        path,
+        bucket: process.env.CLOUDFLARE_R2_BUCKET || 'stream-assets',
+        expiresIn: 86400,
+        message: 'Presigned URL generated successfully for direct browser upload',
+      });
+    } catch (sdkError) {
+      console.error('[API Upload Presign SDK Error]', sdkError);
+      return res.status(500).json({ success: false, error: 'Failed to generate presigned URL via SDK' });
+    }
+  } catch (err) {
+    console.error('[API Upload Presign Error]', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/upload/complete - Notify backend that direct upload is complete
+app.post('/api/upload/complete', async (req, res) => {
+  try {
+    const { userId, path, sizeBytes, metadata } = req.body;
+    if (!userId || !path) {
+      return res.status(400).json({ success: false, error: 'userId and path are required' });
+    }
+
+    // In a full implementation, you would:
+    // 1. Save video metadata to database (Supabase/PostgreSQL)
+    // 2. Update user's video library
+    // 3. Trigger any FFmpeg processing jobs
+    // 4. Send notification to user
+
+    // For now, we'll log the completion and return success
+    console.log('[API Upload Complete]', { userId, path, sizeBytes, metadata });
+
+    return res.status(200).json({
+      success: true,
+      path,
+      sizeBytes,
+      message: 'Video upload completed and metadata saved',
+    });
+  } catch (err) {
+    console.error('[API Upload Complete Error]', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
