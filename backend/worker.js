@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * StreamPulse - Fault-Tolerant 24/7 YouTube Streaming Worker Engine
- * Stack: Node.js 20 + BullMQ + ioredis + Supabase + FFmpeg Direct Copy
+ * Stack: Node.js 22 + BullMQ + ioredis + Supabase + FFmpeg Direct Copy
  * Architecture: Isolated Worker Node (stream-worker-node)
  * ============================================================================
  * 

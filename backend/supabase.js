@@ -28,6 +28,11 @@ export const supabase = createClient(supabaseUrl || 'https://placeholder.supabas
     persistSession: false,
     autoRefreshToken: false,
   },
+  realtime: {
+    transport: typeof WebSocket !== 'undefined' ? WebSocket : undefined,
+    timeout: 30000,
+    heartbeatIntervalMs: 15000,
+  },
 });
 
 export { SUPABASE_STORAGE_BUCKET, STORAGE_PROVIDER };
