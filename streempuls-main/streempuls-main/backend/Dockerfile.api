@@ -16,14 +16,14 @@ WORKDIR /app
 # --------------------------------------------------------------------------
 COPY package.json package-lock.json ./
 
-# Deterministic, reproducible install. `npm ci` requires package-lock.json
-# and installs exactly the locked versions (faster & safer than `npm install`).
+# Deterministic, reproducible backend install. `npm ci` requires
+# package-lock.json and installs exactly the locked backend versions.
 RUN npm ci --no-audit --no-fund
 
 # --------------------------------------------------------------------------
-# Application layer
+# Application layer — backend source files only (no frontend/src, no dist)
 # --------------------------------------------------------------------------
-COPY . .
+COPY server.js queue.js supabase.js storage.js ./
 
 # Expose the API port
 EXPOSE 4000
@@ -32,5 +32,5 @@ EXPOSE 4000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
   CMD wget -q -O - http://127.0.0.1:4000/health > /dev/null || curl -fs http://127.0.0.1:4000/health > /dev/null || exit 1
 
-# Start the Express API gateway
-CMD ["npm", "start"]
+# Start the Express API gateway (backend only)
+CMD ["node", "server.js"]
