@@ -6,7 +6,7 @@ import cors from 'cors';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash, randomBytes, randomUUID, scryptSync } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -222,6 +222,27 @@ function safeUser(user) {
   return profile;
 }
 
+function verifyPassword(user, password) {
+  if (typeof user.password_hash === 'string' && typeof user.password_salt === 'string') {
+    try {
+      const actualHash = scryptSync(password, user.password_salt, 64);
+      const expectedHash = Buffer.from(user.password_hash, 'hex');
+      return expectedHash.length === actualHash.length && timingSafeEqual(actualHash, expectedHash);
+    } catch {
+      return false;
+    }
+  }
+
+  // Support accounts created by the legacy local JSON auth implementation.
+  if (typeof user.password === 'string') {
+    const actualHash = createHash('sha256').update(password).digest();
+    const expectedHash = createHash('sha256').update(user.password).digest();
+    return timingSafeEqual(actualHash, expectedHash);
+  }
+
+  return false;
+}
+
 app.get(['/health', '/healthz', '/api/health'], (_req, res) => {
   return res.status(200).json({
     status: 'healthy',
@@ -424,6 +445,47 @@ app.post('/api/auth/register', (req, res, next) => {
       accessToken,
       tokenType: 'Bearer',
       message: 'Account registered successfully.',
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/auth/login', (req, res, next) => {
+  try {
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const password = req.body?.password;
+    if (!email || typeof password !== 'string' || password.length === 0) {
+      return res.status(400).json({ success: false, error: 'Email and password are required.' });
+    }
+
+    const users = readUsers();
+    const userIndex = users.findIndex((user) => String(user.email || '').trim().toLowerCase() === email);
+    if (userIndex === -1 || !verifyPassword(users[userIndex], password)) {
+      return res.status(401).json({ success: false, error: 'Invalid email or password.' });
+    }
+
+    const accessToken = randomBytes(32).toString('hex');
+    const user = { ...users[userIndex] };
+
+    // Upgrade legacy plaintext password storage after successful verification.
+    if (!user.password_hash || !user.password_salt) {
+      user.password_salt = randomBytes(16).toString('hex');
+      user.password_hash = scryptSync(password, user.password_salt, 64).toString('hex');
+      delete user.password;
+    }
+    user.auth_token_hash = createHash('sha256').update(accessToken).digest('hex');
+    user.updated_at = new Date().toISOString();
+    users[userIndex] = user;
+    writeUsers(users);
+
+    return res.status(200).json({
+      success: true,
+      user: safeUser(user),
+      token: accessToken,
+      accessToken,
+      tokenType: 'Bearer',
+      message: `Signed in as ${user.email}.`,
     });
   } catch (error) {
     return next(error);
