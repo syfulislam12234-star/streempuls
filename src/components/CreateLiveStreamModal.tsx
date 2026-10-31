@@ -258,7 +258,7 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
     setUploadProgress(10);
 
     try {
-      const asset = await apiClient.uploadVideo(file, (percent) => {
+      const asset = await apiClient.uploadDirectToR2(file, (percent) => {
         setUploadProgress(percent);
       });
       setSelectedVideoUrl(asset.url);

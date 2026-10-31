@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { UploadCloud, CheckCircle2, Film, RefreshCw, X, ArrowRight, Database } from 'lucide-react';
+import { UploadCloud, CheckCircle2, Film, RefreshCw, X, ArrowRight, Database, AlertCircle } from 'lucide-react';
 import { apiClient } from '../services/apiClient';
 
 export interface StorageUploadedAsset {
@@ -75,6 +75,7 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
   const [isDragging, setIsDragging] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [uploadStage, setUploadStage] = useState<string>('');
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadedAsset, setUploadedAsset] = useState<StorageUploadedAsset | null>(null);
   const [serverAssets, setServerAssets] = useState<StorageUploadedAsset[]>([]);
   const [isLoadingAssets, setIsLoadingAssets] = useState(false);
@@ -126,6 +127,14 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
       return;
     }
 
+    // R2 single-part PutObject supports objects up to 5 GB. Multipart upload is
+    // intentionally not used here; large files should be split with an S3 multipart flow.
+    const maxSinglePutBytes = 5_000_000_000;
+    if (file.size > maxSinglePutBytes) {
+      setUploadError('This file exceeds the 5 GB direct-upload limit. Multipart uploads are not configured.');
+      return;
+    }
+
     const localBlobUrl = URL.createObjectURL(file);
     const sizeInMb = +(file.size / (1024 * 1024)).toFixed(1);
     const cleanTitle = file.name
@@ -134,6 +143,7 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
       .replace(/\b\w/g, (c) => c.toUpperCase());
 
     setUploadProgress(5);
+    setUploadError(null);
     setUploadStage('Requesting secure presigned upload URL from Cloudflare R2...');
 
     try {
@@ -164,43 +174,11 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
 
       setUploadedAsset(asset);
     } catch (err: any) {
-      console.warn('[Direct R2 Upload Fallback]', err);
-      // Seamless fallback via standard streaming adapter
-      try {
-        setUploadStage('Direct R2 fallback: uploading via multi-cloud adapter...');
-        const response = await apiClient.uploadVideo(file, (percent) => {
-          setUploadProgress(percent);
-          setUploadStage(`Uploading media payload (${percent}%)...`);
-        });
-
-        setUploadProgress(100);
-        setUploadStage(`Asset saved to ${response.storageProvider}!`);
-        setUploadedAsset({
-          fileName: response.fileName,
-          url: response.url,
-          fileSizeMb: response.fileSizeMb || sizeInMb,
-          durationSeconds: 120,
-          resolution: response.resolution || '1920x1080 (60fps source)',
-          codec: response.codec || 'H.264 / AAC (Direct Copy Ready)',
-          previewUrl: localBlobUrl,
-          titleSuggestion: response.titleSuggestion || `${cleanTitle} 24/7 Live Stream`,
-          storageProvider: response.storageProvider,
-        });
-      } catch (fallbackErr: any) {
-        setUploadProgress(100);
-        setUploadStage('Asset saved to local media repository.');
-        setUploadedAsset({
-          fileName: file.name,
-          url: localBlobUrl,
-          fileSizeMb: sizeInMb,
-          durationSeconds: 120,
-          resolution: '1920x1080 (60fps source)',
-          codec: 'H.264 / AAC (Direct Copy Ready)',
-          previewUrl: localBlobUrl,
-          titleSuggestion: `${cleanTitle} 24/7 Live Stream`,
-          storageProvider: 'Cloudflare R2 (Local Mirror)',
-        });
-      }
+      console.error('[Direct R2 Upload Failed]', err);
+      URL.revokeObjectURL(localBlobUrl);
+      setUploadProgress(null);
+      setUploadStage('');
+      setUploadError(err.message || 'Direct Cloudflare R2 upload failed. The video was not sent to the backend.');
     }
   };
 
@@ -279,6 +257,12 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
           <div className="p-6 overflow-y-auto space-y-5">
             {!uploadedAsset ? (
               <>
+                {uploadError && (
+                  <div className="flex items-start gap-2 rounded-xl border border-red-800 bg-red-950/50 p-3 text-xs text-red-200" role="alert">
+                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+                    <span>{uploadError}</span>
+                  </div>
+                )}
                 {/* Drag & Drop Zone */}
                 <div
                   onDragOver={(e) => {

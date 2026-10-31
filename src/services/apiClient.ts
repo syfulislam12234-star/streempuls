@@ -432,6 +432,10 @@ export const apiClient = {
     file: File,
     onProgress?: (percent: number) => void
   ): Promise<UploadedAssetResponse> {
+    if (file.size > 5_000_000_000) {
+      throw new Error('This file exceeds the 5 GB single-request R2 upload limit. Multipart uploads are not configured.');
+    }
+
     const fileSizeMb = +(file.size / (1024 * 1024)).toFixed(1);
     const contentType = file.type || 'video/mp4';
 
@@ -443,10 +447,22 @@ export const apiClient = {
       preferredProvider: 'r2',
     });
 
-    // 2. Perform direct binary PUT to Cloudflare R2 bucket (bypassing main backend)
+    let uploadUrl: URL;
+    try {
+      uploadUrl = new URL(presigned.uploadUrl);
+    } catch {
+      throw new Error('The storage API did not return a valid absolute Cloudflare R2 upload URL.');
+    }
+    if (presigned.provider !== 'r2' || uploadUrl.protocol !== 'https:' || uploadUrl.origin === window.location.origin) {
+      throw new Error('The storage API did not return a direct HTTPS Cloudflare R2 upload URL.');
+    }
+
+    // 2. Send the File directly to R2 in one signed PUT; video bytes never go to Express.
+    // Single-part PutObject supports up to 5 GB. This client does not use multipart.
     await new Promise<void>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('PUT', presigned.uploadUrl);
+      xhr.open('PUT', uploadUrl.toString());
+      xhr.withCredentials = false;
 
       // Apply required headers (e.g. Content-Type)
       if (presigned.headers) {
@@ -468,11 +484,12 @@ export const apiClient = {
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve();
         } else {
-          reject(new Error(`Cloudflare R2 direct upload failed with HTTP status ${xhr.status}`));
+          reject(new Error(`Cloudflare R2 direct upload failed with HTTP status ${xhr.status}.`));
         }
       };
 
       xhr.onerror = () => reject(new Error('Network error during Cloudflare R2 direct stream upload'));
+      xhr.onabort = () => reject(new Error('Cloudflare R2 direct upload was cancelled'));
       xhr.send(file);
     });
 
