@@ -29,7 +29,8 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "ioredis": "^5.5.0",
-    "multer": "^2.5.0"
+    "multer": "^2.5.0",
+    "ws": "^8.22.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

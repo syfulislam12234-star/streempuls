@@ -1,4 +1,7 @@
 
+import { createServer } from 'node:http';
+import { WebSocketServer } from 'ws';
+
 function readLocalPayments() {
   ensureDataDir();
   try {
@@ -18,26 +21,9 @@ let wss;
 let connectedClients = new Set();
 
 try {
-  const http = require('http');
-  const WebSocket = require('ws');
-  const { WebSocketServer } = WebSocket;
-
-  const server = http.createServer();
-  const wsServer = new WebSocketServer({ server, path: '/ws/sync' });
+  const server = createServer();
+  wss = new WebSocketServer({ server, path: '/ws/sync' });
   connectedClients = new Set();
-  wsServer.on('connection', (ws) => { connectedClients.add(ws); ws.on('close', () => connectedClients.delete(ws)); });
-  server.listen(4001, () => console.log('[WebSocket] WebSocket Sync Server listening on port 4001 at /ws/sync'));
-} catch (e) { console.error('[WebSocket] Failed to initialize WebSocket server:', e.message); }
-
-// WebSocket Support (at end of file, outside any function)
-try {
-  const http = require('http');
-  const WebSocket = require('ws');
-  const { WebSocketServer } = WebSocket;
-
-  const server = http.createServer();
-  const wsServer = new WebSocketServer({ server, path: '/ws/sync' });
-  connectedClients = new Set();
-  wsServer.on('connection', (ws) => { connectedClients.add(ws); ws.on('close', () => connectedClients.delete(ws)); });
+  wss.on('connection', (ws) => { connectedClients.add(ws); ws.on('close', () => connectedClients.delete(ws)); });
   server.listen(4001, () => console.log('[WebSocket] WebSocket Sync Server listening on port 4001 at /ws/sync'));
 } catch (e) { console.error('[WebSocket] Failed to initialize WebSocket server:', e.message); }
