@@ -5000,6 +5000,29 @@ app.post('/api/cluster/auto-scale/evaluate', (_req, res) => {
   return res.status(200).json({ success: true, message: 'Autonomous auto-scaler cycle completed', report });
 });
 
+// Ensure unknown API requests never fall through to the SPA's HTML response.
+app.use('/api', (req, res) => {
+  return res.status(404).json({
+    success: false,
+    error: `API endpoint ${req.method} ${req.originalUrl} not found`,
+  });
+});
+
+// Keep API parser and handler failures in the JSON format expected by the frontend.
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) return next(err);
+
+  const status = Number(err.status || err.statusCode) || 500;
+  if (req.path.startsWith('/api/')) {
+    return res.status(status).json({
+      success: false,
+      error: err.message || 'Internal API error',
+    });
+  }
+
+  return next(err);
+});
+
 // ----------------------------------------------------------------------------
 // Vite Middleware Mounting (Development & Production SPA)
 // ----------------------------------------------------------------------------
