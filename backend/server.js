@@ -80,16 +80,38 @@ let r2ClientPromise;
 let r2CorsConfigurationPromise;
 
 function getR2Configuration() {
-  const accountId = process.env.CLOUDFLARE_R2_ACCOUNT_ID;
-  const accessKeyId = process.env.CLOUDFLARE_R2_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY;
-  const bucket = process.env.CLOUDFLARE_R2_BUCKET || 'stream-assets';
+  const config = {
+    accountId: process.env.CLOUDFLARE_R2_ACCOUNT_ID?.trim(),
+    accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID?.trim(),
+    secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY?.trim(),
+    bucket: process.env.CLOUDFLARE_R2_BUCKET?.trim() || 'stream-assets',
+  };
+  const invalidPlaceholder = /^(your_|placeholder|change[-_ ]?me|<.*>)|example/i;
+  const invalidKeys = Object.entries(config)
+    .filter(([key, value]) => key !== 'bucket' && (!value || invalidPlaceholder.test(value)))
+    .map(([key]) => key);
 
-  if (!accountId || !accessKeyId || !secretAccessKey) {
-    throw new Error('Cloudflare R2 is not configured. Set CLOUDFLARE_R2_ACCOUNT_ID, CLOUDFLARE_R2_ACCESS_KEY_ID, and CLOUDFLARE_R2_SECRET_ACCESS_KEY.');
+  if (invalidKeys.length > 0) {
+    const error = new Error(`Cloudflare R2 is not configured. Set valid values for: ${invalidKeys.join(', ')}.`);
+    error.code = 'R2_CONFIG_MISSING';
+    throw error;
   }
 
-  return { accountId, accessKeyId, secretAccessKey, bucket };
+  return config;
+}
+
+function logR2PresignError(error, req) {
+  const metadata = error?.$metadata || {};
+  console.error('[Cloudflare R2 Presign Error]', {
+    method: req.method,
+    path: req.originalUrl,
+    name: error?.name,
+    message: error?.message,
+    code: error?.code || error?.Code,
+    httpStatusCode: metadata.httpStatusCode,
+    requestId: metadata.requestId || metadata.extendedRequestId,
+    stack: error?.stack,
+  });
 }
 
 async function getR2Client() {
@@ -347,7 +369,17 @@ app.post('/api/storage/presigned-upload', async (req, res, next) => {
       bypassBackendBandwidth: true,
     });
   } catch (error) {
-    return next(error);
+    logR2PresignError(error, req);
+    if (error?.code === 'R2_CONFIG_MISSING') {
+      return res.status(503).json({ success: false, error: error.message, code: error.code });
+    }
+    const status = Number(error?.$metadata?.httpStatusCode) || 502;
+    return res.status(status >= 400 && status < 600 ? status : 502).json({
+      success: false,
+      error: 'Cloudflare R2 could not generate the upload URL. Check backend logs for the R2 request details.',
+      code: error?.code || error?.Code || 'R2_PRESIGN_FAILED',
+      requestId: error?.$metadata?.requestId || error?.$metadata?.extendedRequestId || undefined,
+    });
   }
 });
 
