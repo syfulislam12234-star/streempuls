@@ -18,7 +18,7 @@ dotenv.config();
 
 export const STORAGE_PROVIDER = (process.env.STORAGE_PROVIDER || 'supabase').toLowerCase();
 export const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'stream-assets';
-export const CLOUDFLARE_R2_BUCKET = process.env.CLOUDFLARE_R2_BUCKET || 'stream-assets';
+export const CLOUDFLARE_R2_BUCKET = process.env.CLOUDFLARE_R2_BUCKET_NAME || process.env.CLOUDFLARE_R2_BUCKET || 'stream-assets';
 
 // Shared Supabase Admin Client
 const supabaseUrl = process.env.SUPABASE_URL || 'https://wkchgdchgeormxvvlude.supabase.co';

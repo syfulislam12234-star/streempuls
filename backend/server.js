@@ -84,7 +84,9 @@ function getR2Configuration() {
     accountId: process.env.CLOUDFLARE_R2_ACCOUNT_ID?.trim(),
     accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID?.trim(),
     secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY?.trim(),
-    bucket: process.env.CLOUDFLARE_R2_BUCKET?.trim() || 'stream-assets',
+    bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME?.trim()
+      || process.env.CLOUDFLARE_R2_BUCKET?.trim()
+      || 'stream-assets',
   };
   const invalidPlaceholder = /^(your_|placeholder|change[-_ ]?me|<.*>)|example/i;
   const invalidKeys = Object.entries(config)
