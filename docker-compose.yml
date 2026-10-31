@@ -38,6 +38,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
     container_name: streampulse-api
     restart: on-failure
     environment:

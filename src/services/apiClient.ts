@@ -290,6 +290,38 @@ export const EXTERNAL_ADMIN_BASE_URL: string =
   '';
 
 /**
+ * Public origin of the StreamPulse API, configured at frontend build time.
+ * Leave empty to use same-origin routing (including the Vite /api proxy in development).
+ */
+export const API_BASE_URL: string =
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL?.trim())
+    ? import.meta.env.VITE_API_BASE_URL.trim().replace(/\/+$/, '')
+    : '';
+
+function resolveApiUrl(input: RequestInfo | URL): RequestInfo | URL {
+  if (typeof input !== 'string' || !input.startsWith('/api/')) return input;
+  return API_BASE_URL ? `${API_BASE_URL}${input}` : input;
+}
+
+// Route every API fetch through the configured backend origin. Detect HTML responses
+// early so a proxy/SPA misconfiguration gives a useful error rather than JSON parse noise.
+function fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const resolvedInput = resolveApiUrl(input);
+  const isApiRequest = typeof input === 'string' && input.startsWith('/api/');
+  const headers = new Headers(init?.headers);
+  if (isApiRequest && !headers.has('Accept')) headers.set('Accept', 'application/json');
+
+  return globalThis.fetch(resolvedInput, { ...init, headers }).then((response) => {
+    if (isApiRequest && response.headers.get('content-type')?.includes('text/html')) {
+      throw new Error(
+        `API request ${input} returned HTML instead of JSON. Check VITE_API_BASE_URL and the production API route.`,
+      );
+    }
+    return response;
+  });
+}
+
+/**
  * Generates secure authentication headers (Bearer token, Remote API key, Client identification)
  * for requests dispatched from this user application to the backend/external admin server.
  */
@@ -334,7 +366,8 @@ export const apiClient = {
 
     const xhr = new XMLHttpRequest();
     return new Promise((resolve, reject) => {
-      xhr.open('POST', '/api/upload');
+      xhr.open('POST', resolveApiUrl('/api/upload') as string);
+      xhr.setRequestHeader('Accept', 'application/json');
 
       if (onProgress && xhr.upload) {
         xhr.upload.onprogress = (event) => {
@@ -994,7 +1027,7 @@ export const apiClient = {
   },
 
   listenToStreamTelemetry(streamId: string, onData: (data: StreamTelemetryData) => void): () => void {
-    const eventSource = new EventSource(`/api/streams/${streamId}/telemetry/stream`);
+    const eventSource = new EventSource(resolveApiUrl(`/api/streams/${streamId}/telemetry/stream`) as string);
     eventSource.onmessage = (event) => {
       try {
         const parsed = JSON.parse(event.data);
