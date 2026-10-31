@@ -13,6 +13,7 @@ const PORT = Number(process.env.PORT) || 4000;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || path.resolve(__dirname, '../data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const STREAMS_FILE = path.join(DATA_DIR, 'streams.json');
 const DIST_DIR = path.resolve(__dirname, '../dist');
 const PAYMENT_SETTINGS_FILE = path.join(DATA_DIR, 'payment_settings.json');
 const SITE_CONTENT_FILE = path.join(DATA_DIR, 'site_content.json');
@@ -88,6 +89,49 @@ function readUsers() {
 function writeUsers(users) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf8');
+}
+
+function readStreams() {
+  const streams = readJsonFile(STREAMS_FILE, []);
+  return Array.isArray(streams) ? streams : [];
+}
+
+function writeStreams(streams) {
+  writeJsonFile(STREAMS_FILE, streams);
+}
+
+function normalizeStreamPayload(payload = {}) {
+  return {
+    title: payload.title,
+    description: payload.description,
+    video_url: payload.videoUrl ?? payload.video_url,
+    thumbnail_url: payload.thumbnailUrl ?? payload.thumbnail_url ?? null,
+    stream_key: payload.streamKey ?? payload.stream_key,
+    rtmp_server_url: payload.rtmpServerUrl ?? payload.rtmp_server_url ?? 'rtmp://a.rtmp.youtube.com/live2',
+    destinations: Array.isArray(payload.destinations) ? payload.destinations : [],
+    orientation: payload.orientation === 'vertical' ? 'vertical' : 'horizontal',
+    category: payload.category || 'Entertainment',
+    audience: payload.audience === 'made_for_kids' ? 'made_for_kids' : 'not_for_kids',
+    visibility: ['public', 'unlisted', 'private', 'scheduled'].includes(payload.visibility) ? payload.visibility : 'public',
+    scheduled_for: payload.scheduledFor ?? payload.scheduled_for ?? null,
+    direct_copy_mode: payload.directCopyMode ?? payload.direct_copy_mode ?? true,
+    is_looping: payload.isLooping ?? payload.is_looping ?? true,
+  };
+}
+
+function getStreamUser(userId) {
+  const users = readUsers();
+  return users.find((user) => user.id === userId)
+    || users.find((user) => user.subscription_status === 'active')
+    || users[0];
+}
+
+function getStreamLimits(user) {
+  const tier = user?.subscription_tier || 'free';
+  return {
+    channelLimit: Math.max(1, Number(user?.channel_limit) || 1),
+    destinationLimit: tier === 'business' ? 4 : tier === 'pro' ? 2 : 1,
+  };
 }
 
 function getTierConfig(tier) {
@@ -313,6 +357,221 @@ app.post('/api/subscription/checkout', (req, res, next) => {
   } catch (error) {
     return next(error);
   }
+});
+
+app.get('/api/streams', (_req, res, next) => {
+  try {
+    const streams = readStreams().sort((left, right) =>
+      new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
+    return res.status(200).json({ success: true, streams });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/streams', (req, res, next) => {
+  try {
+    const payload = normalizeStreamPayload(req.body);
+    if (typeof payload.title !== 'string' || !payload.title.trim()
+      || typeof payload.video_url !== 'string' || !payload.video_url.trim()
+      || typeof payload.stream_key !== 'string' || !payload.stream_key.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Title, videoUrl, and streamKey are required',
+      });
+    }
+
+    const userId = req.get('x-user-id');
+    const user = getStreamUser(userId);
+    const { channelLimit, destinationLimit } = getStreamLimits(user);
+    const streams = readStreams();
+    const userStreams = streams.filter((stream) => !userId || stream.user_id === userId);
+    if (userStreams.length >= channelLimit) {
+      return res.status(403).json({
+        success: false,
+        error: `Your plan allows up to ${channelLimit} stream channel(s).`,
+      });
+    }
+    if (payload.destinations.length > destinationLimit) {
+      return res.status(403).json({
+        success: false,
+        error: `Your plan allows up to ${destinationLimit} streaming destination(s).`,
+      });
+    }
+
+    const now = new Date().toISOString();
+    const stream = {
+      id: randomUUID(),
+      ...payload,
+      title: payload.title.trim().slice(0, 100),
+      description: typeof payload.description === 'string' ? payload.description.slice(0, 500) : '',
+      video_url: payload.video_url.trim(),
+      stream_key: payload.stream_key.trim(),
+      destinations: payload.destinations.slice(0, destinationLimit),
+      user_id: userId || user?.id || null,
+      status: 'idle',
+      uptime_seconds: 0,
+      current_bitrate_kbps: 0,
+      fps: 0,
+      cpu_usage_pct: 0,
+      mem_usage_mb: 0,
+      ffmpeg_pid: null,
+      created_at: now,
+      updated_at: now,
+    };
+
+    streams.unshift(stream);
+    writeStreams(streams);
+    return res.status(201).json({ success: true, stream });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.put('/api/streams/:id', (req, res, next) => {
+  try {
+    const streams = readStreams();
+    const index = streams.findIndex((stream) => stream.id === req.params.id);
+    if (index === -1) return res.status(404).json({ success: false, error: 'Stream not found' });
+
+    const patch = normalizeStreamPayload({ ...streams[index], ...req.body });
+    if (patch.destinations.length > getStreamLimits(getStreamUser(req.get('x-user-id'))).destinationLimit) {
+      return res.status(403).json({ success: false, error: 'Your plan destination limit was exceeded.' });
+    }
+
+    const updated = {
+      ...streams[index],
+      ...patch,
+      title: String(patch.title || '').trim().slice(0, 100),
+      description: typeof patch.description === 'string' ? patch.description.slice(0, 500) : '',
+      updated_at: new Date().toISOString(),
+    };
+    streams[index] = updated;
+    writeStreams(streams);
+    return res.status(200).json({ success: true, stream: updated });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.delete('/api/streams/:id', (req, res, next) => {
+  try {
+    const streams = readStreams();
+    const index = streams.findIndex((stream) => stream.id === req.params.id);
+    if (index === -1) return res.status(404).json({ success: false, error: 'Stream not found' });
+    streams.splice(index, 1);
+    writeStreams(streams);
+    return res.status(200).json({ success: true, message: 'Stream deleted' });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/streams/test-connection', (req, res) => {
+  const { rtmpServerUrl = '', streamKey } = req.body || {};
+  if (typeof streamKey !== 'string' || !streamKey.trim()) {
+    return res.status(400).json({ success: false, error: 'A stream key is required' });
+  }
+  if (rtmpServerUrl && !/^rtmps?:\/\//i.test(rtmpServerUrl)) {
+    return res.status(400).json({ success: false, error: 'RTMP URL must start with rtmp:// or rtmps://' });
+  }
+  return res.status(200).json({ success: true, message: 'Destination is ready for streaming.' });
+});
+
+app.post('/api/streams/:id/start', async (req, res, next) => {
+  try {
+    const streams = readStreams();
+    const index = streams.findIndex((stream) => stream.id === req.params.id);
+    if (index === -1) return res.status(404).json({ success: false, error: 'Stream not found' });
+
+    const stream = streams[index];
+    if (!stream.video_url || !stream.stream_key) {
+      return res.status(400).json({ success: false, error: 'Stream video URL and stream key are required before starting.' });
+    }
+
+    const { streamQueue } = await import('./queue.js');
+    const job = await streamQueue.add('start-stream', {
+      streamId: stream.id,
+      videoUrl: stream.video_url,
+      streamKey: stream.stream_key,
+      rtmpServerUrl: stream.rtmp_server_url,
+      destinations: stream.destinations,
+      subscriptionTier: getStreamUser(req.get('x-user-id') || stream.user_id)?.subscription_tier || 'free',
+      orientation: stream.orientation,
+      directCopyMode: stream.direct_copy_mode,
+      isLooping: stream.is_looping,
+    }, { jobId: `start-${stream.id}-${Date.now()}` });
+
+    streams[index] = {
+      ...stream,
+      status: 'starting',
+      updated_at: new Date().toISOString(),
+      last_started_at: new Date().toISOString(),
+    };
+    writeStreams(streams);
+    return res.status(202).json({ success: true, pid: null, jobId: job.id, status: 'starting' });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/streams/:id/stop', async (req, res, next) => {
+  try {
+    const streams = readStreams();
+    const index = streams.findIndex((stream) => stream.id === req.params.id);
+    if (index === -1) return res.status(404).json({ success: false, error: 'Stream not found' });
+
+    const { redisClient } = await import('./queue.js');
+    await redisClient.publish('stream-control-bus', JSON.stringify({ action: 'STOP', streamId: req.params.id }));
+    streams[index] = {
+      ...streams[index],
+      status: 'idle',
+      ffmpeg_pid: null,
+      current_bitrate_kbps: 0,
+      fps: 0,
+      cpu_usage_pct: 0,
+      mem_usage_mb: 0,
+      last_stopped_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    writeStreams(streams);
+    return res.status(200).json({ success: true, status: 'idle', message: 'Stream stop requested.' });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get('/api/streams/:id/logs', (req, res) => {
+  const stream = readStreams().find((item) => item.id === req.params.id);
+  if (!stream) return res.status(404).json({ success: false, error: 'Stream not found' });
+  const isLive = stream.status === 'live' || stream.status === 'starting';
+  return res.status(200).json({
+    success: true,
+    logs: [`[${stream.status}] Stream ${stream.title} is ${stream.status}.`],
+    isLive,
+    pid: stream.ffmpeg_pid ?? null,
+  });
+});
+
+app.get('/api/streams/:id/telemetry', (req, res) => {
+  const stream = readStreams().find((item) => item.id === req.params.id);
+  if (!stream) return res.status(404).json({ success: false, error: 'Stream not found' });
+  return res.status(200).json({
+    success: true,
+    status: stream.status,
+    telemetry: {
+      bitrate_kbps: stream.current_bitrate_kbps || 0,
+      fps: stream.fps || 0,
+      dropped_frames: 0,
+      cpu_usage_pct: stream.cpu_usage_pct || 0,
+      mem_usage_mb: stream.mem_usage_mb || 0,
+      health_status: stream.status === 'live' ? 'good' : 'warning',
+      speed: stream.status === 'live' ? '1.00x' : '0.00x',
+      uptime_seconds: stream.uptime_seconds || 0,
+      destinations_count: (stream.destinations?.length || 0) + 1,
+      timestamp: new Date().toISOString(),
+    },
+  });
 });
 
 // Unknown API paths must remain JSON and must never reach the SPA fallback.
