@@ -185,18 +185,12 @@ function MainApp() {
   const isPlanActive = currentUser?.subscription_status === 'active';
 
   // Logout handler
-  const handleLogout = async () => {
+  const handleLogout = () => {
     apiClient.logoutUser();
-    // Re-fetch me or default user (defaults to unpaid test user)
-    const users = await apiClient.getUsers();
-    const unpaidTestUser = users.find((u) => u.subscription_status === 'unpaid') || users[0];
-    if (unpaidTestUser) {
-      apiClient.setStoredUserId(unpaidTestUser.id);
-      setCurrentUser(unpaidTestUser);
-    } else {
-      setCurrentUser(null);
-    }
+    setCurrentUser(null);
     setIsPlanModalOpen(false);
+    setIsMobileSidebarOpen(false);
+    setIsAuthModalOpen(true);
   };
 
   return (

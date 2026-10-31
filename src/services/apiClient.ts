@@ -868,6 +868,10 @@ export const apiClient = {
   // 15b. Sign out
   logoutUser() {
     this.setStoredUserId(null);
+    try {
+      localStorage.removeItem('streempulse_auth_token');
+      localStorage.removeItem('auth_token');
+    } catch {}
   },
 
   // 16. Get current authenticated user profile
