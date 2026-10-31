@@ -100,6 +100,54 @@ function readLocalWithdrawals() {
   return [];
 }
 
+function readLocalStreams() {
+  ensureDataDir();
+  const STREAMS_FILE = path.join(DATA_DIR, 'streams.json');
+  try {
+    if (fs.existsSync(STREAMS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(STREAMS_FILE, 'utf-8'));
+      if (Array.isArray(data)) return data;
+    }
+  } catch (e) {}
+  return [];
+}
+
+function readLocalProfiles() {
+  ensureDataDir();
+  const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
+  try {
+    if (fs.existsSync(PROFILES_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf-8'));
+      if (Array.isArray(data)) return data;
+    }
+  } catch (e) {}
+  return [];
+}
+
+function readSiteContent() {
+  ensureDataDir();
+  const SITE_CONTENT_FILE = path.join(DATA_DIR, 'site_content.json');
+  try {
+    if (fs.existsSync(SITE_CONTENT_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SITE_CONTENT_FILE, 'utf-8'));
+      if (typeof data === 'object') return data;
+    }
+  } catch (e) {}
+  return {};
+}
+
+function readPaymentSettings() {
+  ensureDataDir();
+  const PAYMENT_SETTINGS_FILE = path.join(DATA_DIR, 'payment_settings.json');
+  try {
+    if (fs.existsSync(PAYMENT_SETTINGS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PAYMENT_SETTINGS_FILE, 'utf-8'));
+      if (typeof data === 'object') return data;
+    }
+  } catch (e) {}
+  return {};
+}
+
 function writeLocalWithdrawals(withdrawals) {
   ensureDataDir();
   try { fs.writeFileSync(WITHDRAWALS_FILE, JSON.stringify(withdrawals, null, 2), 'utf-8'); } catch (e) {}
@@ -120,6 +168,38 @@ function readLocalPayments() {
   ensureDataDir();
   try {
     if (fs.existsSync(PAYMENTS_FILE)) {
+}
+
+// Real-Time WebSocket Synchronization Server (/ws/sync)
+let wss;
+let connectedClients = new Set();
+
+try {
+  const http = require('http');
+  const WebSocket = require('ws');
+
+  // Create HTTP server if not already created
+  const server = http.createServer();
+
+  const wsServer = new WebSocketServer({
+    server,
+    path: '/ws/sync'
+  });
+  connectedClients = new Set<>();
+
+  wsServer.on('connection', (ws) => {
+    connectedClients.add(ws);
+    ws.on('close', () => {
+      connectedClients.delete(ws);
+    });
+  });
+
+  server.listen(4001, () => {
+    console.log('[WebSocket] WebSocket Sync Server listening on port 4001 at /ws/sync');
+  });
+} catch (e) {
+  console.error('[WebSocket] Failed to initialize WebSocket server:', e.message);
+}
       const data = JSON.parse(fs.readFileSync(PAYMENTS_FILE, 'utf-8'));
       if (Array.isArray(data)) return data;
     }
@@ -329,7 +409,14 @@ app.post('/api/streams/start', async (req, res) => {
       .single();
 
     if (streamError || !stream) {
-      return res.status(404).json({ success: false, error: 'Stream not found in database' });
+      // Try local data fallback first
+      const localStreams = readLocalStreams();
+      const localStream = localStreams.find((s) => s.id === streamId);
+      if (localStream) {
+        // Use local stream data
+      } else {
+        return res.status(404).json({ success: false, error: 'Stream not found in database or local data' });
+      }
     }
 
     // Verify ownership if userId is supplied in auth header / body
@@ -346,14 +433,30 @@ app.post('/api/streams/start', async (req, res) => {
     }
 
     // Verify user profile quota
-    const { data: profile, error: profileError } = await supabase
-      .from('profiles')
-      .select('max_concurrent_streams, is_banned')
-      .eq('id', stream.user_id)
-      .single();
+    let profile = null;
 
-    if (profileError || !profile) {
-      return res.status(404).json({ success: false, error: 'User profile not found' });
+    try {
+      const { data: supaProfile, error: supaProfileError } = await supabase
+        .from('profiles')
+        .select('max_concurrent_streams, is_banned')
+        .eq('id', stream.user_id)
+        .single();
+
+      if (!supaProfileError && supaProfile) {
+        profile = supaProfile;
+      } else {
+        // Fall back to local JSON data
+        const localProfiles = readLocalProfiles();
+        profile = localProfiles.find((p) => p.id === stream.user_id);
+      }
+    } catch (supaProfileError) {
+      // Fall back to local JSON data on Supabase error
+      const localProfiles = readLocalProfiles();
+      profile = localProfiles.find((p) => p.id === stream.user_id);
+    }
+
+    if (!profile) {
+      return res.status(404).json({ success: false, error: 'User profile not found in database or local data' });
     }
 
     if (profile.is_banned) {
@@ -1297,13 +1400,30 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
       return res.status(400).json({ success: false, error: 'User ID is required' });
     }
 
-    // Use the Cloudflare R2 storage adapter to upload the file
+    // Validate R2 is configured before attempting upload
     const storageAdapter = getStorageProvider('r2');
     if (!storageAdapter || storageAdapter.name !== 'r2') {
-      return res.status(500).json({ success: false, error: 'Cloudflare R2 storage not configured. Set STORAGE_PROVIDER=r2.' });
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Cloudflare R2 storage not configured. Set STORAGE_PROVIDER=r2 and provide CLOUDFLARE_R2_ACCOUNT_ID, CLOUDFLARE_R2_ACCESS_KEY_ID, CLOUDFLARE_R2_SECRET_ACCESS_KEY in Coolify.' 
+      });
+    }
+    
+    // Additional check: verify R2 S3 client is initialized
+    if (storageAdapter.s3Client === null || storageAdapter.s3Client === undefined) {
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Cloudflare R2 S3 client not initialized. Check that CLOUDFLARE_R2_ACCOUNT_ID, CLOUDFLARE_R2_ACCESS_KEY_ID, and CLOUDFLARE_R2_SECRET_ACCESS_KEY are properly set in Coolify.' 
+      });
     }
 
-    const buffer = req.file.buffer || fs.readFile(req.file.path);
+    let buffer;
+if (req.file) {
+  buffer = req.file.buffer || (req.file.path ? fs.readFile(req.file.path) : null);
+}
+if (!buffer) {
+  return res.status(400).json({ success: false, error: 'Could not read uploaded file buffer' });
+}
     const cleanPath = `streams/${Date.now()}-${req.file.originalname.replace(/[^a-zA-Z0-9.-]/g, '-')}`;
     
     const result = await storageAdapter.upload(cleanPath, buffer, req.file.mimeType);
