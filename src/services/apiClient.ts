@@ -414,9 +414,17 @@ export const apiClient = {
     headers: Record<string, string>;
     expiresInSeconds: number;
   }> {
+    const headers = getAuthHeaders();
+    if (typeof window !== 'undefined' && !headers.Authorization) {
+      try {
+        const token = localStorage.getItem('streempulse_auth_token') || localStorage.getItem('auth_token');
+        if (token) headers.Authorization = `Bearer ${token}`;
+      } catch {}
+    }
+
     const res = await fetch('/api/storage/presigned-upload', {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers,
       body: JSON.stringify(payload),
     });
     const data = await res.json();
