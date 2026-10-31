@@ -1,7 +1,8 @@
 
 import express from 'express';
 import { createServer } from 'node:http';
-import { WebSocketServer } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
+import cors from 'cors';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,8 +14,67 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || path.resolve(__dirname, '../data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const DIST_DIR = path.resolve(__dirname, '../dist');
+const PAYMENT_SETTINGS_FILE = path.join(DATA_DIR, 'payment_settings.json');
+const SITE_CONTENT_FILE = path.join(DATA_DIR, 'site_content.json');
+const NOTIFICATIONS_FILE = path.join(DATA_DIR, 'notifications.json');
+const allowedOrigins = (process.env.CORS_ORIGINS || 'https://streempuls.mooo.com,https://www.streempuls.mooo.com,http://localhost:5173,http://127.0.0.1:5173')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
+app.use(cors({
+  origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)),
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-User-Id', 'X-Admin-Api-Key'],
+  optionsSuccessStatus: 204,
+}));
 app.use(express.json());
+
+function readJsonFile(filePath, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonFile(filePath, value) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2), 'utf8');
+}
+
+const defaultPaymentSettings = {
+  bkash_personal: '01712-345678',
+  bkash_merchant: '01987-654321',
+  nagad_personal: '01812-345678',
+  nagad_merchant: '01612-345678',
+  rocket_personal: '01712-345678',
+  rocket_merchant: '01987-654321',
+  whatsapp_number: '+8801712345678',
+};
+
+function readPaymentSettings() {
+  return { ...defaultPaymentSettings, ...readJsonFile(PAYMENT_SETTINGS_FILE, {}) };
+}
+
+function readSiteContent() {
+  return readJsonFile(SITE_CONTENT_FILE, {
+    id: 'site_content',
+    terms_of_service: 'StreamPulse Terms of Service',
+    acceptable_use_policy: 'StreamPulse Acceptable Use Policy',
+    privacy_policy: 'StreamPulse Privacy Policy',
+    support_whatsapp: defaultPaymentSettings.whatsapp_number,
+    tier_limits: {
+      free: { maxStreams: 1, maxHours: 10, maxChannels: 1, watermark: true },
+      pro: { maxStreams: 2, maxHours: 720, maxChannels: 2, watermark: false },
+      business: { maxStreams: 4, maxHours: -1, maxChannels: 4, watermark: false },
+    },
+    version: '2.4',
+    last_updated: new Date().toISOString(),
+  });
+}
+
+const apiServer = createServer(app);
 
 function readUsers() {
   try {
@@ -55,6 +115,64 @@ app.get(['/health', '/healthz', '/api/health'], (_req, res) => {
 
 app.get('/api/users', (_req, res) => {
   return res.json({ success: true, users: readUsers().map(safeUser) });
+});
+
+app.get('/api/payment-settings', (_req, res, next) => {
+  try {
+    return res.status(200).json({ success: true, settings: readPaymentSettings() });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get('/api/site-content', (_req, res, next) => {
+  try {
+    const content = readSiteContent();
+    const paymentSettings = readPaymentSettings();
+    return res.status(200).json({
+      success: true,
+      content: {
+        ...content,
+        support_whatsapp: paymentSettings.whatsapp_number || content.support_whatsapp,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.get('/api/notifications', (req, res, next) => {
+  try {
+    const userId = req.get('x-user-id') || req.query.userId;
+    const allNotifications = readJsonFile(NOTIFICATIONS_FILE, []);
+    const notifications = (Array.isArray(allNotifications) ? allNotifications : [])
+      .filter((notification) => !userId || notification.user_id === userId)
+      .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
+
+    return res.status(200).json({
+      success: true,
+      notifications,
+      unreadCount: notifications.filter((notification) => !notification.is_read).length,
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/notifications/:id/read', (req, res, next) => {
+  try {
+    const userId = req.get('x-user-id');
+    const notifications = readJsonFile(NOTIFICATIONS_FILE, []);
+    const notification = (Array.isArray(notifications) ? notifications : [])
+      .find((item) => item.id === req.params.id && (!userId || item.user_id === userId));
+    if (!notification) return res.status(404).json({ success: false, error: 'Notification not found' });
+
+    notification.is_read = true;
+    writeJsonFile(NOTIFICATIONS_FILE, notifications);
+    return res.status(200).json({ success: true, notification });
+  } catch (error) {
+    return next(error);
+  }
 });
 
 app.get('/api/auth/me', (req, res) => {
@@ -238,18 +356,51 @@ app.use((error, _req, res, _next) => {
   });
 });
 
-// WebSocket Support (at end of file, outside any function)
-let wss;
-let connectedClients = new Set();
+const connectedClients = new Set();
+const websocketOriginAllowed = (origin) => !origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin);
+const websocketOptions = {
+  path: '/ws/sync',
+  verifyClient: ({ origin }, callback) => {
+    callback(websocketOriginAllowed(origin), websocketOriginAllowed(origin) ? undefined : 403, 'Origin not allowed');
+  },
+};
 
-try {
-  const server = createServer();
-  wss = new WebSocketServer({ server, path: '/ws/sync' });
-  connectedClients = new Set();
-  wss.on('connection', (ws) => { connectedClients.add(ws); ws.on('close', () => connectedClients.delete(ws)); });
-  server.listen(4001, () => console.log('[WebSocket] WebSocket Sync Server listening on port 4001 at /ws/sync'));
-} catch (e) { console.error('[WebSocket] Failed to initialize WebSocket server:', e.message); }
+function sendInitialConfig(ws) {
+  ws.send(JSON.stringify({
+    type: 'INITIAL_CONFIG',
+    payload: {
+      paymentSettings: readPaymentSettings(),
+      siteContent: readSiteContent(),
+      timestamp: new Date().toISOString(),
+    },
+  }));
+}
 
-app.listen(PORT, () => {
+function handleWebSocketConnection(ws) {
+  connectedClients.add(ws);
+  try {
+    sendInitialConfig(ws);
+  } catch (error) {
+    console.warn('[WebSocket] Failed to send initial configuration:', error.message);
+  }
+  ws.on('close', () => connectedClients.delete(ws));
+  ws.on('error', () => connectedClients.delete(ws));
+}
+
+// Serve the public wss://<domain>/ws/sync upgrade on the same origin/port as Express.
+const wss = new WebSocketServer({ server: apiServer, ...websocketOptions });
+wss.on('connection', handleWebSocketConnection);
+
+// Keep port 4001 available for existing direct/internal WebSocket clients.
+const legacyWebSocketHttpServer = createServer();
+const legacyWss = new WebSocketServer({ server: legacyWebSocketHttpServer, ...websocketOptions });
+legacyWss.on('connection', handleWebSocketConnection);
+const legacyWebSocketPort = Number(process.env.WS_PORT) || 4001;
+legacyWebSocketHttpServer.listen(legacyWebSocketPort, () => {
+  console.log(`[WebSocket] Compatibility listener on port ${legacyWebSocketPort} at /ws/sync`);
+});
+
+apiServer.listen(PORT, () => {
   console.log(`[API] Express server listening on port ${PORT}`);
+  console.log(`[WebSocket] Public sync endpoint available at /ws/sync on port ${PORT}`);
 });
