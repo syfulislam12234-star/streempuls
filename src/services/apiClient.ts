@@ -822,6 +822,11 @@ export const apiClient = {
     });
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to register account');
+    if (data.accessToken || data.token) {
+      try {
+        localStorage.setItem('streempulse_auth_token', data.accessToken || data.token);
+      } catch {}
+    }
     if (data.user?.id) {
       this.setStoredUserId(data.user.id);
     }

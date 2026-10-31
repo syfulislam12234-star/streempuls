@@ -5,6 +5,7 @@ import { WebSocketServer } from 'ws';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash, randomBytes, randomUUID, scryptSync } from 'node:crypto';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -40,7 +41,7 @@ function getTierConfig(tier) {
 }
 
 function safeUser(user) {
-  const { password, ...profile } = user;
+  const { password, password_hash, password_salt, auth_token_hash, ...profile } = user;
   return profile;
 }
 
@@ -58,10 +59,68 @@ app.get('/api/users', (_req, res) => {
 
 app.get('/api/auth/me', (req, res) => {
   const users = readUsers();
+  const bearerToken = req.get('authorization')?.replace(/^Bearer\s+/i, '');
   const requestedUserId = req.get('x-user-id');
-  const user = users.find((candidate) => candidate.id === requestedUserId) || users[0];
+  const tokenHash = bearerToken ? createHash('sha256').update(bearerToken).digest('hex') : null;
+  const user = (tokenHash && users.find((candidate) => candidate.auth_token_hash === tokenHash))
+    || users.find((candidate) => candidate.id === requestedUserId)
+    || (!requestedUserId && !bearerToken ? users[0] : null);
   if (!user) return res.status(404).json({ success: false, error: 'No user session found' });
   return res.json({ success: true, user: safeUser(user) });
+});
+
+app.post('/api/auth/register', (req, res, next) => {
+  try {
+    const { email, password, full_name, fullName } = req.body || {};
+    const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const normalizedName = typeof (full_name ?? fullName) === 'string' ? (full_name ?? fullName).trim() : '';
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      return res.status(400).json({ success: false, error: 'A valid email address is required' });
+    }
+    if (typeof password !== 'string' || password.length < 8) {
+      return res.status(400).json({ success: false, error: 'Password must be at least 8 characters long' });
+    }
+
+    const users = readUsers();
+    if (users.some((user) => String(user.email).toLowerCase() === normalizedEmail)) {
+      return res.status(409).json({ success: false, error: 'An account with this email already exists' });
+    }
+
+    const now = new Date().toISOString();
+    const passwordSalt = randomBytes(16).toString('hex');
+    const passwordHash = scryptSync(password, passwordSalt, 64).toString('hex');
+    const accessToken = randomBytes(32).toString('hex');
+    const tierConfig = getTierConfig('free');
+    const user = {
+      id: randomUUID(),
+      email: normalizedEmail,
+      full_name: normalizedName || normalizedEmail.split('@')[0],
+      role: 'user',
+      subscription_tier: 'free',
+      subscription_status: 'unpaid',
+      ...tierConfig,
+      password_hash: passwordHash,
+      password_salt: passwordSalt,
+      auth_token_hash: createHash('sha256').update(accessToken).digest('hex'),
+      created_at: now,
+      updated_at: now,
+    };
+
+    users.unshift(user);
+    writeUsers(users);
+
+    return res.status(201).json({
+      success: true,
+      user: safeUser(user),
+      token: accessToken,
+      accessToken,
+      tokenType: 'Bearer',
+      message: 'Account registered successfully.',
+    });
+  } catch (error) {
+    return next(error);
+  }
 });
 
 app.post('/api/subscription/select-plan', (req, res, next) => {
