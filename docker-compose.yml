@@ -43,6 +43,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=4000
+      - DATA_DIR=/app/data
       - QUEUE_NAME=streaming-queue
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -58,8 +59,10 @@ services:
       - CLOUDFLARE_R2_SECRET_ACCESS_KEY=${CLOUDFLARE_R2_SECRET_ACCESS_KEY:-}
       - CLOUDFLARE_R2_BUCKET=${CLOUDFLARE_R2_BUCKET:-stream-assets}
       - CLOUDFLARE_R2_PUBLIC_DOMAIN=${CLOUDFLARE_R2_PUBLIC_DOMAIN:-}
-    ports:
-      - "4000:4000"
+    expose:
+      - "4000"
+    volumes:
+      - app-data:/app/data
     depends_on:
       redis:
         condition: service_healthy
@@ -85,8 +88,64 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  # --------------------------------------------------------------------------
+  # 3. ISOLATED STREAMING WORKER
+  # --------------------------------------------------------------------------
+  stream-worker-node:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: on-failure
+    environment:
+      - NODE_ENV=production
+      - QUEUE_NAME=streaming-queue
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MAX_CONCURRENT_STREAMS=10
+      - MAX_RESTART_RETRIES=5
+      - WORKER_CONCURRENCY=10
+      - MEMORY_CEILING_MB=1850
+      - STORAGE_PROVIDER=${STORAGE_PROVIDER:-supabase}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - SUPABASE_STORAGE_BUCKET=${SUPABASE_STORAGE_BUCKET:-stream-assets}
+      - CLOUDFLARE_R2_ACCOUNT_ID=${CLOUDFLARE_R2_ACCOUNT_ID:-}
+      - CLOUDFLARE_R2_ACCESS_KEY_ID=${CLOUDFLARE_R2_ACCESS_KEY_ID:-}
+      - CLOUDFLARE_R2_SECRET_ACCESS_KEY=${CLOUDFLARE_R2_SECRET_ACCESS_KEY:-}
+      - CLOUDFLARE_R2_BUCKET=${CLOUDFLARE_R2_BUCKET:-stream-assets}
+      - CLOUDFLARE_R2_PUBLIC_DOMAIN=${CLOUDFLARE_R2_PUBLIC_DOMAIN:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend-api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "node", "healthcheck-worker.js"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048M
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    networks:
+      - streampulse-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
 volumes:
   redis-data:
+    driver: local
+  app-data:
     driver: local
 
 networks:

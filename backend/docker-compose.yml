@@ -48,6 +48,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=4000
+      - DATA_DIR=/app/data
       - QUEUE_NAME=streaming-queue
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -63,8 +64,10 @@ services:
       - CLOUDFLARE_R2_SECRET_ACCESS_KEY=${CLOUDFLARE_R2_SECRET_ACCESS_KEY:-}
       - CLOUDFLARE_R2_BUCKET=${CLOUDFLARE_R2_BUCKET:-stream-assets}
       - CLOUDFLARE_R2_PUBLIC_DOMAIN=${CLOUDFLARE_R2_PUBLIC_DOMAIN:-}
-    ports:
-      - "4000:4000"
+    expose:
+      - "4000"
+    volumes:
+      - app-data:/app/data
     depends_on:
       redis:
         condition: service_healthy
@@ -154,6 +157,8 @@ services:
 
 volumes:
   redis-data:
+    driver: local
+  app-data:
     driver: local
 
 networks:

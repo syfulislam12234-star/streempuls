@@ -27,7 +27,7 @@ const PORT = process.env.PORT || 4000;
 // Preserves existing user accounts, referrals, notifications, and earnings.
 // Data files live in ../data/ relative to backend/ directory.
 // ----------------------------------------------------------------------------
-const DATA_DIR = path.resolve(__dirname, '../data');
+const DATA_DIR = process.env.DATA_DIR || path.resolve(__dirname, '../data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const NOTIFICATIONS_FILE = path.join(DATA_DIR, 'notifications.json');
 const PROMOCODES_FILE = path.join(DATA_DIR, 'promocodes.json');
@@ -1349,7 +1349,7 @@ app.post('/api/upload/presign', async (req, res) => {
 
     // Generate presigned PUT URL using AWS SDK directly
     try {
-      const { S3Client } = await import('@aws-sdk/client-s3');
+      const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
       const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
       const client = new S3Client({
         region: 'auto',
@@ -1359,7 +1359,7 @@ app.post('/api/upload/presign', async (req, res) => {
           secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
         },
       });
-      const command = new (await import('@aws-sdk/s3-request-presigner')).PutObjectCommand({
+      const command = new PutObjectCommand({
         Bucket: process.env.CLOUDFLARE_R2_BUCKET || 'stream-assets',
         Key: path,
       });
@@ -1429,7 +1429,7 @@ app.get('*', (req, res, next) => {
 });
 
 // Start Express Listener
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`=======================================================`);
   console.log(`StreamPulse API Gateway running on port ${PORT}`);
   console.log(`- POST /api/streams/start`);

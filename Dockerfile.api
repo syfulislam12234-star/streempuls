@@ -8,7 +8,7 @@ WORKDIR /app
 
 # Install frontend dependencies (package-lock.json pinned for reproducibility)
 COPY package.json package-lock.json ./
-RUN npm install --legacy-peer-deps --no-audit --no-fund
+RUN npm ci --include=dev --legacy-peer-deps --no-audit --no-fund
 
 # Copy frontend source and build production static assets into /app/dist
 COPY vite.config.ts index.html ./
@@ -33,6 +33,9 @@ RUN npm ci --omit=dev --no-audit --no-fund
 
 # Copy built frontend from the builder stage
 COPY --from=frontend-builder /app/dist ./dist
+
+# Preserve the API's checked-in local-data fallback in the runtime image.
+COPY data ./data
 
 # Copy backend application source
 COPY backend/ ./backend/
