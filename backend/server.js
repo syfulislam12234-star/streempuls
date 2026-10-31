@@ -76,6 +76,79 @@ function readSiteContent() {
 }
 
 const apiServer = createServer(app);
+let r2ClientPromise;
+let r2CorsConfigurationPromise;
+
+function getR2Configuration() {
+  const accountId = process.env.CLOUDFLARE_R2_ACCOUNT_ID;
+  const accessKeyId = process.env.CLOUDFLARE_R2_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY;
+  const bucket = process.env.CLOUDFLARE_R2_BUCKET || 'stream-assets';
+
+  if (!accountId || !accessKeyId || !secretAccessKey) {
+    throw new Error('Cloudflare R2 is not configured. Set CLOUDFLARE_R2_ACCOUNT_ID, CLOUDFLARE_R2_ACCESS_KEY_ID, and CLOUDFLARE_R2_SECRET_ACCESS_KEY.');
+  }
+
+  return { accountId, accessKeyId, secretAccessKey, bucket };
+}
+
+async function getR2Client() {
+  if (!r2ClientPromise) {
+    r2ClientPromise = (async () => {
+      const { S3Client } = await import('@aws-sdk/client-s3');
+      const { accountId, accessKeyId, secretAccessKey } = getR2Configuration();
+      return new S3Client({
+        region: 'auto',
+        endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+        credentials: { accessKeyId, secretAccessKey },
+      });
+    })().catch((error) => {
+      r2ClientPromise = null;
+      throw error;
+    });
+  }
+  return r2ClientPromise;
+}
+
+function getR2CorsOrigins() {
+  return (process.env.R2_CORS_ALLOWED_ORIGINS || process.env.CORS_ORIGINS || 'https://streempuls.mooo.com')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter((origin) => origin && origin !== '*');
+}
+
+async function ensureR2BrowserCors() {
+  if (!r2CorsConfigurationPromise) {
+    r2CorsConfigurationPromise = (async () => {
+      const { PutBucketCorsCommand } = await import('@aws-sdk/client-s3');
+      const client = await getR2Client();
+      const { bucket } = getR2Configuration();
+      const corsOrigins = getR2CorsOrigins();
+
+      if (corsOrigins.length === 0) {
+        throw new Error('Set R2_CORS_ALLOWED_ORIGINS to the frontend origin, for example https://streempuls.mooo.com.');
+      }
+
+      await client.send(new PutBucketCorsCommand({
+        Bucket: bucket,
+        CORSConfiguration: {
+          CORSRules: [{
+            AllowedOrigins: corsOrigins,
+            AllowedMethods: ['PUT', 'GET', 'HEAD'],
+            AllowedHeaders: ['*'],
+            ExposeHeaders: ['ETag'],
+            MaxAgeSeconds: 3600,
+          }],
+        },
+      }));
+      console.log(`[Cloudflare R2] Browser CORS configured for ${corsOrigins.join(', ')} on bucket ${bucket}`);
+    })().catch((error) => {
+      r2CorsConfigurationPromise = null;
+      throw error;
+    });
+  }
+  return r2CorsConfigurationPromise;
+}
 
 function readUsers() {
   try {
@@ -179,6 +252,78 @@ app.get('/api/site-content', (_req, res, next) => {
         ...content,
         support_whatsapp: paymentSettings.whatsapp_number || content.support_whatsapp,
       },
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/storage/presigned-upload', async (req, res, next) => {
+  try {
+    const {
+      fileName,
+      contentType = 'video/mp4',
+      fileSizeMb,
+      preferredProvider = 'r2',
+      expiresIn = 900,
+    } = req.body || {};
+
+    if (preferredProvider !== 'r2') {
+      return res.status(400).json({ success: false, error: 'This endpoint only generates Cloudflare R2 upload URLs.' });
+    }
+    if (typeof fileName !== 'string' || !fileName.trim()) {
+      return res.status(400).json({ success: false, error: 'fileName is required.' });
+    }
+    if (typeof contentType !== 'string' || !/^(video|image)\/[a-z0-9.+-]+$/i.test(contentType)) {
+      return res.status(400).json({ success: false, error: 'A valid video or image Content-Type is required.' });
+    }
+    if (fileSizeMb != null && (!Number.isFinite(Number(fileSizeMb)) || Number(fileSizeMb) <= 0 || Number(fileSizeMb) > 5000)) {
+      return res.status(400).json({ success: false, error: 'fileSizeMb must be greater than 0 and no more than 5000 MB for a single PUT.' });
+    }
+    const requestOrigin = req.get('origin');
+    const corsOrigins = getR2CorsOrigins();
+    if (requestOrigin && !corsOrigins.includes(requestOrigin)) {
+      return res.status(403).json({ success: false, error: 'This frontend origin is not allowed to upload directly to Cloudflare R2.' });
+    }
+
+    const { bucket, accountId } = getR2Configuration();
+    const safeFileName = path.basename(fileName.trim()).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const key = `media/${Date.now()}-${randomUUID()}-${safeFileName}`;
+    const ttl = Math.min(Math.max(Number(expiresIn) || 900, 60), 3600);
+
+    // R2 checks bucket CORS on the browser's preflight; CORS headers on this API
+    // response cannot grant PUT permission to the separate object-storage origin.
+    await ensureR2BrowserCors();
+
+    const client = await getR2Client();
+    const { PutObjectCommand } = await import('@aws-sdk/client-s3');
+    const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
+    const uploadUrl = await getSignedUrl(
+      client,
+      new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: contentType }),
+      { expiresIn: ttl },
+    );
+
+    const publicDomain = process.env.CLOUDFLARE_R2_PUBLIC_DOMAIN;
+    const publicUrl = publicDomain
+      ? `https://${publicDomain.replace(/^https?:\/\//, '').replace(/\/+$/, '')}/${key}`
+      : `https://${bucket}.${accountId}.r2.cloudflarestorage.com/${key}`;
+
+    return res.status(200).json({
+      success: true,
+      uploadUrl,
+      publicUrl,
+      key,
+      provider: 'r2',
+      headers: { 'Content-Type': contentType },
+      expiresInSeconds: ttl,
+      method: 'PUT',
+      cors: {
+        allowedOrigin: requestOrigin || null,
+        allowedMethods: ['PUT'],
+        allowedHeaders: ['Content-Type'],
+      },
+      bypassBackendBandwidth: true,
     });
   } catch (error) {
     return next(error);
