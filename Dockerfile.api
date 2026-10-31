@@ -28,8 +28,8 @@ RUN apk add --no-cache curl ca-certificates
 WORKDIR /app
 
 # Install backend dependencies (deterministic via package-lock.json)
-COPY backend/package.json backend/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+COPY backend/package*.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
 # Copy built frontend from the builder stage
 COPY --from=frontend-builder /app/dist ./dist

@@ -16,7 +16,7 @@ WORKDIR /app
 
 # Install dependencies (leverage Docker layer caching)
 COPY package*.json ./
-RUN npm install && npm cache clean --force
+RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 # Copy worker application source files
 COPY worker.js queue.js supabase.js storage.js healthcheck-worker.js ./
