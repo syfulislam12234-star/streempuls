@@ -185,7 +185,7 @@ try {
     server,
     path: '/ws/sync'
   });
-  connectedClients = new Set<>();
+  connectedClients = new Set();
 
   wsServer.on('connection', (ws) => {
     connectedClients.add(ws);
