@@ -85,3 +85,11 @@ services:
         max-size: "20m"
         max-file: "5"
 
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  streampulse-net:
+    driver: bridge
+
