@@ -24,7 +24,7 @@ try {
 
   const server = http.createServer();
   const wsServer = new WebSocketServer({ server, path: '/ws/sync' });
-  connectedClients = new Set<>();
+  connectedClients = new Set();
   wsServer.on('connection', (ws) => { connectedClients.add(ws); ws.on('close', () => connectedClients.delete(ws)); });
   server.listen(4001, () => console.log('[WebSocket] WebSocket Sync Server listening on port 4001 at /ws/sync'));
 } catch (e) { console.error('[WebSocket] Failed to initialize WebSocket server:', e.message); }
@@ -54,7 +54,7 @@ try {
 
   const server = http.createServer();
   const wsServer = new WebSocketServer({ server, path: '/ws/sync' });
-  connectedClients = new Set<>();
+  connectedClients = new Set();
   wsServer.on('connection', (ws) => { connectedClients.add(ws); ws.on('close', () => connectedClients.delete(ws)); });
   server.listen(4001, () => console.log('[WebSocket] WebSocket Sync Server listening on port 4001 at /ws/sync'));
 } catch (e) { console.error('[WebSocket] Failed to initialize WebSocket server:', e.message); }
