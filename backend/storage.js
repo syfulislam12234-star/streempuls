@@ -105,9 +105,9 @@ export class CloudflareR2StorageAdapter {
   constructor() {
     this.name = 'r2';
     this.bucket = CLOUDFLARE_R2_BUCKET;
-    this.accountId = process.env.CLOUDFLARE_R2_ACCOUNT_ID || '';
-    this.accessKeyId = process.env.CLOUDFLARE_R2_ACCESS_KEY_ID || '';
-    this.secretAccessKey = process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY || '';
+    this.accountId = process.env.CLOUDFLARE_R2_ACCOUNT_ID?.trim() || '';
+    this.accessKeyId = process.env.CLOUDFLARE_R2_ACCESS_KEY_ID?.trim() || '';
+    this.secretAccessKey = process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY?.trim() || '';
     this.publicDomain = process.env.CLOUDFLARE_R2_PUBLIC_DOMAIN || '';
     this.s3Client = null;
 
@@ -117,7 +117,7 @@ export class CloudflareR2StorageAdapter {
         import('@aws-sdk/client-s3').then(({ S3Client }) => {
           this.s3Client = new S3Client({
             region: 'auto',
-            endpoint: (process.env.CLOUDFLARE_R2_ENDPOINT || `https://${this.accountId}.r2.cloudflarestorage.com`).replace(/\/+$/, ''),
+            endpoint: (process.env.CLOUDFLARE_R2_ENDPOINT?.trim() || `https://${this.accountId}.r2.cloudflarestorage.com`).replace(/\/+$/, ''),
             forcePathStyle: true,
             credentials: {
               accessKeyId: this.accessKeyId,

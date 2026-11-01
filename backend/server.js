@@ -80,11 +80,13 @@ let r2ClientPromise;
 let r2CorsConfigurationPromise;
 
 function getR2Configuration() {
+  const accountId = process.env.CLOUDFLARE_R2_ACCOUNT_ID?.trim();
   const config = {
-    accountId: process.env.CLOUDFLARE_R2_ACCOUNT_ID?.trim(),
+    accountId,
     accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID?.trim(),
     secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY?.trim(),
-    endpoint: process.env.CLOUDFLARE_R2_ENDPOINT?.trim().replace(/\/+$/, ''),
+    endpoint: (process.env.CLOUDFLARE_R2_ENDPOINT?.trim() || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : ''))
+      .replace(/\/+$/, ''),
     bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME?.trim()
       || process.env.CLOUDFLARE_R2_BUCKET?.trim()
       || 'stream-assets',
@@ -121,10 +123,10 @@ async function getR2Client() {
   if (!r2ClientPromise) {
     r2ClientPromise = (async () => {
       const { S3Client } = await import('@aws-sdk/client-s3');
-      const { accountId, accessKeyId, secretAccessKey, endpoint } = getR2Configuration();
+      const { accessKeyId, secretAccessKey, endpoint } = getR2Configuration();
       return new S3Client({
         region: 'auto',
-        endpoint: endpoint || `https://${accountId}.r2.cloudflarestorage.com`,
+        endpoint,
         forcePathStyle: true,
         credentials: { accessKeyId, secretAccessKey },
       });
