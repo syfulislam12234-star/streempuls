@@ -117,7 +117,8 @@ export class CloudflareR2StorageAdapter {
         import('@aws-sdk/client-s3').then(({ S3Client }) => {
           this.s3Client = new S3Client({
             region: 'auto',
-            endpoint: `https://${this.accountId}.r2.cloudflarestorage.com`,
+            endpoint: (process.env.CLOUDFLARE_R2_ENDPOINT || `https://${this.accountId}.r2.cloudflarestorage.com`).replace(/\/+$/, ''),
+            forcePathStyle: true,
             credentials: {
               accessKeyId: this.accessKeyId,
               secretAccessKey: this.secretAccessKey,
