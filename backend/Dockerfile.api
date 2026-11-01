@@ -23,7 +23,7 @@ RUN npm ci --omit=dev --no-audit --no-fund
 # --------------------------------------------------------------------------
 # Application layer — backend source files only (no frontend/src, no dist)
 # --------------------------------------------------------------------------
-COPY server.js queue.js supabase.js storage.js ./
+COPY server.js r2Config.js queue.js supabase.js storage.js ./
 
 # Expose the API port
 EXPOSE 4000 4001

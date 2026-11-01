@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
+import { getR2Configuration } from './r2Config.js';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -79,43 +80,27 @@ const apiServer = createServer(app);
 let r2ClientPromise;
 let r2CorsConfigurationPromise;
 
-function getR2Configuration() {
-  const accountId = process.env.CLOUDFLARE_R2_ACCOUNT_ID?.trim();
-  const config = {
-    accountId,
-    accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID?.trim(),
-    secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY?.trim(),
-    endpoint: (process.env.CLOUDFLARE_R2_ENDPOINT?.trim() || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : ''))
-      .replace(/\/+$/, ''),
-    bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME?.trim()
-      || process.env.CLOUDFLARE_R2_BUCKET?.trim()
-      || 'stream-assets',
-  };
-  const invalidPlaceholder = /^(your_|placeholder|change[-_ ]?me|<.*>)|example/i;
-  const invalidKeys = Object.entries(config)
-    .filter(([key, value]) => key !== 'bucket' && (!value || invalidPlaceholder.test(value)))
-    .map(([key]) => key);
-
-  if (invalidKeys.length > 0) {
-    const error = new Error(`Cloudflare R2 is not configured. Set valid values for: ${invalidKeys.join(', ')}.`);
-    error.code = 'R2_CONFIG_MISSING';
-    throw error;
-  }
-
-  return config;
-}
-
 function logR2PresignError(error, req) {
   const metadata = error?.$metadata || {};
+  const credentials = [
+    process.env.CLOUDFLARE_R2_ACCESS_KEY_ID,
+    process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
+    process.env.AWS_ACCESS_KEY_ID,
+    process.env.AWS_SECRET_ACCESS_KEY,
+  ].filter((value) => typeof value === 'string' && value.length > 0);
+  const redactCredentials = (value) => credentials.reduce(
+    (safeValue, credential) => safeValue.replaceAll(credential, '[REDACTED]'),
+    String(value || ''),
+  );
   console.error('[Cloudflare R2 Presign Error]', {
     method: req.method,
     path: req.originalUrl,
     name: error?.name,
-    message: error?.message,
+    message: redactCredentials(error?.message),
     code: error?.code || error?.Code,
     httpStatusCode: metadata.httpStatusCode,
     requestId: metadata.requestId || metadata.extendedRequestId,
-    stack: error?.stack,
+    stack: redactCredentials(error?.stack),
   });
 }
 
@@ -350,7 +335,7 @@ app.post('/api/storage/presigned-upload', async (req, res, next) => {
     const uploadUrl = await getSignedUrl(
       client,
       new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: contentType }),
-      { expiresIn: ttl },
+      { expiresIn: ttl, signableHeaders: new Set(['content-type']) },
     );
 
     const publicDomain = process.env.CLOUDFLARE_R2_PUBLIC_DOMAIN;

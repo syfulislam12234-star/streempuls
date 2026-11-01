@@ -106,8 +106,8 @@ export class CloudflareR2StorageAdapter {
     this.name = 'r2';
     this.bucket = CLOUDFLARE_R2_BUCKET;
     this.accountId = process.env.CLOUDFLARE_R2_ACCOUNT_ID?.trim() || '';
-    this.accessKeyId = process.env.CLOUDFLARE_R2_ACCESS_KEY_ID?.trim() || '';
-    this.secretAccessKey = process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY?.trim() || '';
+    this.accessKeyId = process.env.CLOUDFLARE_R2_ACCESS_KEY_ID?.trim() || process.env.AWS_ACCESS_KEY_ID?.trim() || '';
+    this.secretAccessKey = process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY?.trim() || process.env.AWS_SECRET_ACCESS_KEY?.trim() || '';
     this.publicDomain = process.env.CLOUDFLARE_R2_PUBLIC_DOMAIN || '';
     this.s3Client = null;
 
