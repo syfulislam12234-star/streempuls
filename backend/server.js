@@ -16,6 +16,7 @@ const DATA_DIR = process.env.DATA_DIR || path.resolve(__dirname, '../data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const STREAMS_FILE = path.join(DATA_DIR, 'streams.json');
 const DIST_DIR = path.resolve(__dirname, '../dist');
+const UPLOADS_DIR = path.resolve(__dirname, '../uploads');
 const PAYMENT_SETTINGS_FILE = path.join(DATA_DIR, 'payment_settings.json');
 const SITE_CONTENT_FILE = path.join(DATA_DIR, 'site_content.json');
 const NOTIFICATIONS_FILE = path.join(DATA_DIR, 'notifications.json');
@@ -787,6 +788,7 @@ app.use((error, req, res, next) => {
 });
 
 // Serve built frontend assets; index.html is reserved for the explicit SPA route below.
+app.use('/uploads', express.static(UPLOADS_DIR, { index: false, maxAge: '1d' }));
 app.use(express.static(DIST_DIR, { index: false, maxAge: '1d' }));
 
 app.get('*', (req, res, next) => {
