@@ -25,6 +25,7 @@ import path from 'path';
 import dotenv from 'dotenv';
 import { redisConfig, redisClient, QUEUE_NAME } from './queue.js';
 import { supabase, SUPABASE_STORAGE_BUCKET, STORAGE_PROVIDER, getPublicStorageUrl, getSignedStorageUrl } from './supabase.js';
+import { getStorageProvider } from './storage.js';
 
 dotenv.config();
 
@@ -57,6 +58,17 @@ console.log(`===================================================================
 // Guarantees stopping or crashing one stream NEVER drops concurrent sibling streams!
 // ----------------------------------------------------------------------------
 const activeStreams = new Map();
+const SIGNED_SOURCE_URL_TTL_MS = 24 * 60 * 60 * 1000;
+const SIGNED_SOURCE_REFRESH_SKEW_MS = 5 * 60 * 1000;
+
+function redactUrlQuery(value) {
+  try {
+    const url = new URL(value);
+    return url.search ? `${url.origin}${url.pathname}?[REDACTED]` : value;
+  } catch {
+    return value;
+  }
+}
 
 /**
  * Gracefully terminates the exact FFmpeg child process associated with streamId.
@@ -140,23 +152,85 @@ async function launchFfmpegStream(job) {
 
   // Resolve video source from active modular storage adapter (Supabase or switchable R2)
   let inputSource = videoUrl;
+  let signedUrlGeneratedAt = null;
+  let signedUrlTtlMs = null;
+  let refreshSignedInputSource = null;
   if (videoUrl && !videoUrl.startsWith('http://') && !videoUrl.startsWith('https://')) {
     const cleanPath = videoUrl.replace(/^(stream-assets|live-stream-assets)\//, '').replace(/^\/+/, '');
     const signedUrl = await getSignedStorageUrl(cleanPath);
     inputSource = signedUrl || getPublicStorageUrl(cleanPath);
+    if (signedUrl) {
+      const provider = getStorageProvider(STORAGE_PROVIDER);
+      refreshSignedInputSource = () => provider.getSignedUrl(cleanPath, SIGNED_SOURCE_URL_TTL_MS / 1000);
+      signedUrlGeneratedAt = Date.now();
+      signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
+    }
+  } else if (typeof videoUrl === 'string' && /^https?:\/\//i.test(videoUrl)) {
+    try {
+      const parsedUrl = new URL(videoUrl);
+      const pathname = decodeURIComponent(parsedUrl.pathname.replace(/^\/+/, ''));
+      const r2PublicDomain = (process.env.CLOUDFLARE_R2_PUBLIC_DOMAIN || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
+      const isR2Url = parsedUrl.hostname.includes('r2.cloudflarestorage.com')
+        || (r2PublicDomain && parsedUrl.hostname === r2PublicDomain);
+      const supabaseStorageMatch = pathname.match(/^storage\/v1\/object\/(?:public|sign|authenticated)\/[^/]+\/(.+)$/);
+      const isSupabaseStorageUrl = parsedUrl.hostname.includes('supabase.co') && Boolean(supabaseStorageMatch);
+      if (isR2Url || isSupabaseStorageUrl) {
+        const objectKey = isSupabaseStorageUrl ? supabaseStorageMatch[1] : pathname;
+        const provider = isR2Url ? getStorageProvider('r2') : getStorageProvider('supabase');
+        const signedUrl = await provider.getSignedUrl(objectKey, SIGNED_SOURCE_URL_TTL_MS / 1000);
+        if (signedUrl && signedUrl !== videoUrl) {
+          inputSource = signedUrl;
+          refreshSignedInputSource = () => provider.getSignedUrl(objectKey, SIGNED_SOURCE_URL_TTL_MS / 1000);
+          signedUrlGeneratedAt = Date.now();
+          signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
+        }
+      }
+    } catch (signErr) {
+      const signingError = `Storage URL signing failed for stream ${streamId}: unable to obtain a signed playback URL.`;
+      console.warn(`[FFmpeg Engine] ${signingError}`);
+      // Never run FFmpeg with an unsigned private storage URL. Fail closed and record the real error.
+      try {
+        await supabase
+          .from('streams')
+          .update({
+            status: 'ERROR',
+            ffmpeg_pid: null,
+            last_error: signingError,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', streamId);
+      } catch (dbErr) {
+        console.warn(`[Supabase Notice] Failed recording signing error for ${streamId}:`, dbErr.message);
+      }
+      try {
+        await redisClient.publish('stream-telemetry-events', JSON.stringify({
+          streamId,
+          status: 'ERROR',
+          health_status: 'error',
+          last_error: signingError,
+          timestamp: new Date().toISOString(),
+        }));
+      } catch (pubErr) {
+        console.warn(`[Redis Notice] Failed publishing ERROR for ${streamId}:`, pubErr.message);
+      }
+      throw new Error(signingError);
+    }
   }
-
-  const isVertical = orientation === 'vertical';
-  const maskedDests = activeDestinations.map((u) => u.replace(/\/[^/]+$/, '/****KEY'));
-
-  console.log(`[FFmpeg Engine] Preparing stream ${streamId} | Destinations (${activeDestinations.length}):`, maskedDests);
-  console.log(`[FFmpeg Engine] Source: ${inputSource} | Vertical: ${isVertical} | DirectCopy: ${directCopyMode !== false}`);
 
   return new Promise((resolve, reject) => {
     let reconnectAttempts = 0;
     let currentChild = null;
     let reconnectTimeout = null;
     let isTerminated = false;
+    let ffmpegStartSequence = 0;
+    let telemetryUpdateCount = 0;
+    let telemetrySequence = 0;
+    const isVertical = orientation === 'vertical';
+
+  const maskedDests = activeDestinations.map((u) => u.replace(/\/[^/]+$/, '/****KEY'));
+
+  console.log(`[FFmpeg Engine] Preparing stream ${streamId} | Destinations (${activeDestinations.length}):`, maskedDests);
+  console.log(`[FFmpeg Engine] Source: ${redactUrlQuery(inputSource)} | Vertical: ${isVertical} | DirectCopy: ${directCopyMode !== false}`);
 
     // Stream Controller registered in activeStreams
     const streamController = {
@@ -214,6 +288,19 @@ async function launchFfmpegStream(job) {
       if (isTerminated || streamController.isIntentionalStop) {
         resolve();
         return;
+      }
+
+      if (refreshSignedInputSource && signedUrlGeneratedAt && signedUrlTtlMs
+        && Date.now() >= signedUrlGeneratedAt + signedUrlTtlMs - SIGNED_SOURCE_REFRESH_SKEW_MS) {
+        try {
+          const refreshedUrl = await refreshSignedInputSource();
+          if (!refreshedUrl) throw new Error('Storage provider returned an empty signed source URL.');
+          inputSource = refreshedUrl;
+          signedUrlGeneratedAt = Date.now();
+        } catch (error) {
+          await handleProcessCrash(error, null, null);
+          return;
+        }
       }
 
       console.log(`[FFmpeg Spawn] Starting 24/7 stream: ${streamId} (Attempt ${reconnectAttempts + 1}/${MAX_RESTART_RETRIES + 1})`);
@@ -311,6 +398,9 @@ async function launchFfmpegStream(job) {
         );
       }
 
+      const currentProcessSequence = ++ffmpegStartSequence;
+      telemetryUpdateCount = 0;
+      telemetrySequence = 0;
       currentChild = spawn('ffmpeg', ffmpegArgs);
       const pid = currentChild.pid;
 
@@ -321,12 +411,14 @@ async function launchFfmpegStream(job) {
 
       console.log(`[FFmpeg Spawn] Stream ${streamId} active with PID ${pid} (Attempts used: ${reconnectAttempts}/${MAX_RESTART_RETRIES})`);
 
-      // Update Supabase with PID, worker node telemetry, and reset status to live
+      // FFmpeg process spawned — but we do NOT mark 'live' yet.
+      // Status becomes 'live' only after the first telemetry (bitrate/fps) confirms
+      // that FFmpeg is actively sending data to the RTMP destination.
       try {
         await supabase
           .from('streams')
           .update({
-            status: 'live',
+            status: 'starting',
             ffmpeg_pid: pid,
             worker_node_id: WORKER_NODE_ID,
             last_started_at: new Date().toISOString(),
@@ -339,6 +431,9 @@ async function launchFfmpegStream(job) {
       } catch (dbErr) {
         console.warn(`[Supabase Notice] Failed updating stream ${streamId}:`, dbErr.message);
       }
+
+      // Track whether RTMP connection has been confirmed via first telemetry.
+      let rtmpConfirmed = false;
 
       // Stream-specific stderr telemetry feed via Redis Pub/Sub
       let lastTelemetryUpdate = 0;
@@ -369,8 +464,53 @@ async function launchFfmpegStream(job) {
             speed: '1.00x',
             destinations_count: activeDestinations.length,
             reconnect_attempts: reconnectAttempts,
+            ffmpegStartSequence: currentProcessSequence,
+            sequence: ++telemetrySequence,
             timestamp: new Date().toISOString(),
           };
+
+          // Ignore events from an older FFmpeg process (stale telemetry).
+          if (currentProcessSequence !== ffmpegStartSequence) {
+            return;
+          }
+
+          // Sustained telemetry check: require 3 consecutive updates before marking 'live'.
+          // A single bitrate/fps line only means encoding started, not that RTMP output succeeded.
+          if (!rtmpConfirmed && (bitrateMatch || fpsMatch)) {
+            telemetryUpdateCount++;
+            if (telemetryUpdateCount >= 3) {
+              rtmpConfirmed = true;
+              try {
+                await supabase
+                  .from('streams')
+                  .update({
+                    status: 'live',
+                    ffmpeg_pid: pid,
+                    last_heartbeat: new Date().toISOString(),
+                    current_bitrate_kbps: currentBitrate,
+                    fps: currentFps,
+                    updated_at: new Date().toISOString(),
+                  })
+                  .eq('id', streamId);
+              } catch (dbErr) {
+                console.warn(`[Supabase Notice] Failed setting live for ${streamId}:`, dbErr.message);
+              }
+              try {
+                await redisClient.publish('stream-telemetry-events', JSON.stringify({
+                  streamId,
+                  status: 'live',
+                  health_status: telemetryPayload.health_status,
+                  bitrate_kbps: currentBitrate,
+                  fps: currentFps,
+                  timestamp: new Date().toISOString(),
+                }));
+              } catch (pubErr) {
+                console.warn(`[Redis Notice] Failed publishing live for ${streamId}:`, pubErr.message);
+              }
+            }
+          } else if (!rtmpConfirmed) {
+            telemetryUpdateCount = 0;
+          }
 
           try {
             await redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify(telemetryPayload));
@@ -397,9 +537,7 @@ async function launchFfmpegStream(job) {
         handleProcessCrash(err, null, null);
       });
 
-      currentChild.on('exit', (code, signal) => {
-        console.log(`[FFmpeg Exit] Stream ${streamId} (PID: ${pid}) exited with code ${code}, signal: ${signal}`);
-
+      currentChild.on('exit', async (code, signal) => {
         if (streamController.isIntentionalStop || isTerminated || (code === 0 && !signal)) {
           // Intentional stop or clean normal completion
           activeStreams.delete(streamId);
@@ -412,6 +550,18 @@ async function launchFfmpegStream(job) {
             })
             .eq('id', streamId)
             .catch(() => {});
+          try {
+            await redisClient.publish('stream-telemetry-events', JSON.stringify({
+              streamId,
+              status: 'idle',
+              health_status: 'warning',
+              bitrate_kbps: 0,
+              fps: 0,
+              timestamp: new Date().toISOString(),
+            }));
+          } catch (pubErr) {
+            console.warn(`[Redis Notice] Failed publishing idle for ${streamId}:`, pubErr.message);
+          }
           resolve();
         } else {
           // Unexpected crash, non-zero exit code, or network drop -> Autonomous Auto-Recovery
@@ -452,16 +602,25 @@ async function launchFfmpegStream(job) {
             })
             .eq('id', streamId);
 
-          await redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
-            streamId,
-            health_status: 'reconnecting',
-            status: 'reconnecting',
-            reconnectAttempts,
-            maxRetries: MAX_RESTART_RETRIES,
-            backoffDelaySeconds: backoffDelay / 1000,
-            last_error: retryMsg,
-            timestamp: new Date().toISOString(),
-          }));
+          try {
+            await redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
+              streamId,
+              health_status: 'reconnecting',
+              status: 'reconnecting',
+              reconnectAttempts,
+              maxRetries: MAX_RESTART_RETRIES,
+              backoffDelaySeconds: backoffDelay / 1000,
+              last_error: retryMsg,
+              timestamp: new Date().toISOString(),
+            }));
+            await redisClient.publish('stream-telemetry-events', JSON.stringify({
+              streamId,
+              status: 'reconnecting',
+              health_status: 'reconnecting',
+              last_error: retryMsg,
+              timestamp: new Date().toISOString(),
+            }));
+          } catch (e) {}
         } catch (e) {}
 
         reconnectTimeout = setTimeout(() => {
@@ -511,15 +670,24 @@ async function launchFfmpegStream(job) {
               mem_mb: 0,
             });
 
-          await redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
-            streamId,
-            status: 'ERROR',
-            health_status: 'error',
-            reconnectAttempts,
-            maxRetries: MAX_RESTART_RETRIES,
-            last_error: permanentFailureLog,
-            timestamp: new Date().toISOString(),
-          }));
+          try {
+            await redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
+              streamId,
+              status: 'ERROR',
+              health_status: 'error',
+              reconnectAttempts,
+              maxRetries: MAX_RESTART_RETRIES,
+              last_error: permanentFailureLog,
+              timestamp: new Date().toISOString(),
+            }));
+            await redisClient.publish('stream-telemetry-events', JSON.stringify({
+              streamId,
+              status: 'ERROR',
+              health_status: 'error',
+              last_error: permanentFailureLog,
+              timestamp: new Date().toISOString(),
+            }));
+          } catch (e) {}
         } catch (e) {}
 
         reject(new Error(permanentFailureLog));

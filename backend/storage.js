@@ -110,11 +110,12 @@ export class CloudflareR2StorageAdapter {
     this.secretAccessKey = process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY?.trim() || process.env.AWS_SECRET_ACCESS_KEY?.trim() || '';
     this.publicDomain = process.env.CLOUDFLARE_R2_PUBLIC_DOMAIN || '';
     this.s3Client = null;
+    this.initPromise = null;
 
     if (this.accountId && this.accessKeyId && this.secretAccessKey) {
-      try {
-        // Dynamically import AWS SDK if available in environment
-        import('@aws-sdk/client-s3').then(({ S3Client }) => {
+      this.initPromise = (async () => {
+        try {
+          const { S3Client } = await import('@aws-sdk/client-s3');
           this.s3Client = new S3Client({
             region: 'auto',
             endpoint: (process.env.CLOUDFLARE_R2_ENDPOINT?.trim() || `https://${this.accountId}.r2.cloudflarestorage.com`).replace(/\/+$/, ''),
@@ -124,10 +125,17 @@ export class CloudflareR2StorageAdapter {
               secretAccessKey: this.secretAccessKey,
             },
           });
-        }).catch(() => {
-          console.warn('[Cloudflare R2 Adapter] @aws-sdk/client-s3 not loaded; fallback to public URL generator.');
-        });
-      } catch (e) {}
+        } catch (err) {
+          console.warn('[Cloudflare R2 Adapter] Failed to initialize S3 client:', err.message);
+          this.s3Client = null;
+        }
+      })();
+    }
+  }
+
+  async ensureInitialized() {
+    if (this.initPromise) {
+      await this.initPromise;
     }
   }
 
@@ -145,18 +153,19 @@ export class CloudflareR2StorageAdapter {
   }
 
   async getSignedUrl(fileName, expiresInSeconds = 86400) {
+    await this.ensureInitialized();
     const cleanPath = fileName.replace(/^\/+/, '');
-    if (this.s3Client) {
-      try {
-        const { GetObjectCommand } = await import('@aws-sdk/client-s3');
-        const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
-        const command = new GetObjectCommand({ Bucket: this.bucket, Key: cleanPath });
-        return await getSignedUrl(this.s3Client, command, { expiresIn: expiresInSeconds });
-      } catch (err) {
-        console.warn('[Cloudflare R2 Adapter] Presigned URL fallback:', err.message);
-      }
+    if (!this.s3Client) {
+      throw new Error('Cloudflare R2 S3 client not initialized. Check credentials and configuration.');
     }
-    return this.getPublicUrl(cleanPath);
+    try {
+      const { GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
+      const command = new GetObjectCommand({ Bucket: this.bucket, Key: cleanPath });
+      return await getSignedUrl(this.s3Client, command, { expiresIn: expiresInSeconds });
+    } catch (err) {
+      throw new Error('Cloudflare R2 signing failed: ' + err.message);
+    }
   }
 
   async upload(fileName, buffer, contentType = 'video/mp4') {

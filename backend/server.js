@@ -1013,6 +1013,97 @@ legacyWebSocketHttpServer.listen(legacyWebSocketPort, () => {
   console.log(`[WebSocket] Compatibility listener on port ${legacyWebSocketPort} at /ws/sync`);
 });
 
+// Bridge real-time worker telemetry/status events back into this API gateway's
+// local stream store so the dashboard reflects actual FFmpeg status ('live', 'reconnecting', 'ERROR', 'idle')
+// and not just the enqueued 'starting' state. Worker nodes publish status changes to the
+// shared Redis channel below; the API updates data/streams.json accordingly.
+// This is intentionally Redis-optional: if Redis is unavailable the bridge is a no-op.
+async function attachStreamStatusBridge() {
+  let redisClient = null;
+  try {
+    ({ redisClient } = await import('./queue.js'));
+  } catch (err) {
+    console.warn('[Stream Status Bridge] queue module unavailable:', err?.message || err);
+    return;
+  }
+  const sub = redisClient.duplicate();
+  try {
+    await sub.subscribe('stream-telemetry-events');
+    // Track latest event time per stream to reject stale/out-of-order messages.
+    const latestEventTime = new Map();
+    const MIN_STALE_AGE_MS = 5000; // Ignore events older than 5 seconds
+
+    sub.on('message', (_channel, message) => {
+      try {
+        const payload = JSON.parse(message);
+        if (!payload || typeof payload.streamId !== 'string') return;
+        const streams = readStreams();
+        const idx = streams.findIndex((s) => s.id === payload.streamId);
+        if (idx === -1) return;
+        const current = streams[idx];
+
+        // Always reconcile from authoritative database (Supabase/local store) when Redis misses events.
+        // This ensures the dashboard never stays stale after a Redis outage.
+        const latestEventTs = latestEventTime.get(payload.streamId) || new Date(0).getTime();
+        const eventTs = typeof payload.timestamp === 'string' ? new Date(payload.timestamp).getTime() : 0;
+        if (eventTs > 0 && latestEventTs >= eventTs && eventTs + MIN_STALE_AGE_MS > Date.now()) {
+          // Stale or duplicate message (older timestamp or very recent older-than-max).
+          if (payload.status === 'live' && (current.status === 'idle' || current.status === 'stopping')) {
+            // Explicitly block revival of stopped streams by stale live messages.
+            return;
+          }
+          return;
+        }
+        latestEventTime.set(payload.streamId, eventTs);
+
+        // Never revive a stream that is already stopped/stopped gracefully with a stale 'live' message.
+        if ((current.status === 'idle' || current.status === 'stopping') && payload.status === 'live') return;
+
+        const nextStatus = payload.status || current.status;
+        // Only write when the status actually changes (dedup against duplicate Redis messages).
+        if (nextStatus === current.status && eventTs === latestEventTime.get(payload.streamId)) return;
+
+        const next = {
+          ...current,
+          status: nextStatus,
+          updated_at: new Date().toISOString(),
+        };
+
+        if (nextStatus === 'live') {
+          next.current_bitrate_kbps = Number.isFinite(payload.bitrate_kbps) ? payload.bitrate_kbps : current.current_bitrate_kbps;
+          next.fps = Number.isFinite(payload.fps) ? payload.fps : current.fps;
+          next.cpu_usage_pct = Number.isFinite(payload.cpu_usage_pct) ? payload.cpu_usage_pct : current.cpu_usage_pct;
+          next.mem_usage_mb = Number.isFinite(payload.mem_usage_mb) ? payload.mem_usage_mb : current.mem_usage_mb;
+          next.ffmpeg_pid = current.ffmpeg_pid || null;
+        } else if (nextStatus === 'starting') {
+          // Transitional state: preserve existing metrics and pid.
+          next.ffmpeg_pid = current.ffmpeg_pid || null;
+        } else if (nextStatus === 'reconnecting') {
+          next.last_error = payload.last_error || null;
+        } else if (nextStatus === 'ERROR') {
+          next.last_error = payload.last_error || null;
+          next.ffmpeg_pid = null;
+        } else if (nextStatus === 'idle' || nextStatus === 'stopped') {
+          next.status = 'idle';
+          next.ffmpeg_pid = null;
+          next.current_bitrate_kbps = 0;
+          next.fps = 0;
+          next.cpu_usage_pct = 0;
+          next.mem_usage_mb = 0;
+        }
+
+        streams[idx] = next;
+        writeStreams(streams);
+      } catch { /* ignore malformed telemetry messages */ }
+    });
+    sub.on('error', () => {});
+  } catch (err) {
+    console.warn('[Stream Status Bridge] Redis unavailable:', err?.message || err);
+  }
+}
+
+attachStreamStatusBridge().catch(() => {});
+
 apiServer.listen(PORT, () => {
   console.log(`[API] Express server listening on port ${PORT}`);
   console.log(`[WebSocket] Public sync endpoint available at /ws/sync on port ${PORT}`);
