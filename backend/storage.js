@@ -109,6 +109,8 @@ export class CloudflareR2StorageAdapter {
     this.accessKeyId = process.env.CLOUDFLARE_R2_ACCESS_KEY_ID?.trim() || process.env.AWS_ACCESS_KEY_ID?.trim() || '';
     this.secretAccessKey = process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY?.trim() || process.env.AWS_SECRET_ACCESS_KEY?.trim() || '';
     this.publicDomain = process.env.CLOUDFLARE_R2_PUBLIC_DOMAIN || '';
+    this.endpoint = (process.env.CLOUDFLARE_R2_ENDPOINT?.trim()
+      || (this.accountId ? `https://${this.accountId}.r2.cloudflarestorage.com` : '')).replace(/\/+$/, '');
     this.s3Client = null;
     this.initPromise = null;
 
@@ -118,7 +120,7 @@ export class CloudflareR2StorageAdapter {
           const { S3Client } = await import('@aws-sdk/client-s3');
           this.s3Client = new S3Client({
             region: 'auto',
-            endpoint: (process.env.CLOUDFLARE_R2_ENDPOINT?.trim() || `https://${this.accountId}.r2.cloudflarestorage.com`).replace(/\/+$/, ''),
+            endpoint: this.endpoint,
             forcePathStyle: true,
             credentials: {
               accessKeyId: this.accessKeyId,
@@ -164,7 +166,21 @@ export class CloudflareR2StorageAdapter {
       const command = new GetObjectCommand({ Bucket: this.bucket, Key: cleanPath });
       return await getSignedUrl(this.s3Client, command, { expiresIn: expiresInSeconds });
     } catch (err) {
-      throw new Error('Cloudflare R2 signing failed: ' + err.message);
+      throw new Error('Cloudflare R2 signing failed for the configured object.');
+    }
+  }
+
+  async headObject(fileName) {
+    await this.ensureInitialized();
+    const cleanPath = fileName.replace(/^\/+/, '');
+    if (!this.s3Client) {
+      throw new Error('Cloudflare R2 S3 client not initialized. Check credentials and configuration.');
+    }
+    try {
+      const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
+      return await this.s3Client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: cleanPath }));
+    } catch {
+      throw new Error('Cloudflare R2 source object could not be verified in the configured bucket.');
     }
   }
 

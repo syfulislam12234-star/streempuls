@@ -20,6 +20,9 @@ import {
   type StorageProviderType,
 } from './src/services/storageProvider.ts';
 import { fileURLToPath } from 'url';
+import { extractFfmpegErrorLines, sanitizeChildProcessError, sanitizeFfmpegDiagnostic } from './backend/streamDiagnostics.js';
+import { buildStreamDestinations, validateStreamConfiguration } from './backend/streamDestinations.js';
+import { claimStreamOwnership, updateStreamWhenOwned } from './backend/streamOwnership.js';
 import {
   clusterRegistry,
   TIER_RESOURCE_PROFILES,
@@ -32,11 +35,12 @@ dotenv.config();
 
 // Process-level resilience against crashes
 process.on('uncaughtException', (err) => {
-  console.error('[Process Error] Uncaught Exception:', err.message);
+  console.error('[Process Error] Uncaught Exception:', sanitizeFfmpegDiagnostic(err?.message || 'Unknown process error.'));
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  console.warn('[Process Warning] Unhandled Rejection:', reason);
+  const message = reason instanceof Error ? reason.message : String(reason ?? 'Unknown rejection.');
+  console.warn('[Process Warning] Unhandled Rejection:', sanitizeFfmpegDiagnostic(message));
 });
 
 const app = express();
@@ -904,6 +908,7 @@ const upload = multer({
 interface ActiveWorkerProcess {
   child: ChildProcess | null;
   pid: number | null;
+  claimToken?: string;
   startedAt: Date;
   logs: string[];
   intervalId?: NodeJS.Timeout;
@@ -916,6 +921,63 @@ interface ActiveWorkerProcess {
   routingMetadata?: any;
 }
 const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
+const localStartClaims = new Set<string>();
+
+async function updateClaimedStream(
+  streamId: string,
+  claimToken: string,
+  updates: Record<string, unknown>,
+  release = false,
+): Promise<boolean> {
+  if (supabase) {
+    return updateStreamWhenOwned(supabase, {
+      streamId,
+      token: claimToken,
+      updates,
+      release,
+    });
+  }
+
+  const payload = release ? { ...updates, worker_node_id: null } : updates;
+  const streams = readLocalStreams();
+  const index = streams.findIndex((stream) => stream.id === streamId && stream.worker_node_id === claimToken);
+  if (index === -1) return false;
+  streams[index] = { ...streams[index], ...payload };
+  writeLocalStreams(streams);
+  if (release) localStartClaims.delete(streamId);
+  return true;
+}
+
+function stopProcessAfterOwnershipLoss(streamId: string, process: ActiveWorkerProcess, reason: string) {
+  if (activeWorkerProcesses.get(streamId) !== process) return;
+  process.isIntentionalStop = true;
+  if (process.reconnectTimeout) clearTimeout(process.reconnectTimeout);
+  if (process.intervalId) clearInterval(process.intervalId);
+  if (process.containerId) clusterRegistry.releaseStreamJob(process.containerId);
+  activeWorkerProcesses.delete(streamId);
+  try { process.child?.kill('SIGTERM'); } catch {}
+  console.warn(`[Stream ${streamId}] ${reason}; FFmpeg was stopped before it could overwrite another owner.`);
+}
+
+async function updateActiveClaimedStream(
+  streamId: string,
+  process: ActiveWorkerProcess,
+  updates: Record<string, unknown>,
+  release = false,
+): Promise<boolean> {
+  if (!process.claimToken) {
+    stopProcessAfterOwnershipLoss(streamId, process, 'Ownership token was missing');
+    return false;
+  }
+  try {
+    const updated = await updateClaimedStream(streamId, process.claimToken, updates, release);
+    if (!updated) stopProcessAfterOwnershipLoss(streamId, process, 'Ownership was lost');
+    return updated;
+  } catch {
+    stopProcessAfterOwnershipLoss(streamId, process, 'Ownership could not be verified');
+    return false;
+  }
+}
 
 // ----------------------------------------------------------------------------
 // API Routes
@@ -3320,6 +3382,15 @@ app.post('/api/streams', async (req, res) => {
     if (!title || !videoUrl || !streamKey) {
       return res.status(400).json({ success: false, error: 'Title, videoUrl, and streamKey are required' });
     }
+    try {
+      validateStreamConfiguration({
+        rtmpServerUrl: rtmpServerUrl || 'rtmp://a.rtmp.youtube.com/live2',
+        streamKey,
+        destinations,
+      });
+    } catch (error: any) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
 
     // Tier limit enforcement & watermarking
     const userId = req.headers['x-user-id'] as string;
@@ -3483,27 +3554,17 @@ app.put('/api/streams/:id', async (req, res) => {
 app.post('/api/streams/test-connection', (req, res) => {
   try {
     const { rtmpServerUrl, streamKey } = req.body;
-    if (!streamKey || typeof streamKey !== 'string' || !streamKey.trim()) {
-      return res.status(400).json({
-        success: false,
-        error: 'Please enter your stream key before testing the connection.',
-      });
-    }
-
-    const trimmedUrl = (rtmpServerUrl || '').trim();
-    if (trimmedUrl && !trimmedUrl.startsWith('rtmp://') && !trimmedUrl.startsWith('rtmps://')) {
-      return res.status(400).json({
-        success: false,
-        error: 'The stream destination address must start with rtmp:// or rtmps://',
-      });
-    }
+    validateStreamConfiguration({
+      rtmpServerUrl: rtmpServerUrl || 'rtmp://a.rtmp.youtube.com/live2',
+      streamKey,
+    });
 
     return res.status(200).json({
       success: true,
       message: 'Connection verified! Your stream destination is valid and ready to broadcast.',
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(400).json({ success: false, error: err.message });
   }
 });
 
@@ -3541,6 +3602,8 @@ app.delete('/api/streams/:id', async (req, res) => {
 // 5. POST /api/streams/:id/start (Spawn Real Isolated FFmpeg Process with Multi-Casting)
 app.post('/api/streams/:id/start', async (req, res) => {
   const { id } = req.params;
+  let claimToken: string | null = null;
+  let localClaimed = false;
   try {
     let stream: any = null;
     if (supabase) {
@@ -3554,44 +3617,96 @@ app.post('/api/streams/:id/start', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Stream not found' });
     }
 
-    // Stop existing process if already running
-    const existing = activeWorkerProcesses.get(id);
-    if (existing) {
-      if (existing.child) existing.child.kill('SIGTERM');
-      if (existing.intervalId) clearInterval(existing.intervalId);
-      activeWorkerProcesses.delete(id);
+    if (activeWorkerProcesses.has(id) || localStartClaims.has(id)) {
+      return res.status(409).json({ success: false, error: 'Stream is already starting or active.' });
+    }
+
+    const userId = req.headers['x-user-id'] as string;
+    const users = readLocalUsers();
+    const currentUser = (userId ? users.find((u) => u.id === userId) : null) ||
+      users.find((u) => u.subscription_status === 'active') || users[0];
+    const userTier: SubscriptionTier = (currentUser?.subscription_tier as SubscriptionTier) || 'free';
+    try {
+      validateStreamConfiguration({
+        rtmpServerUrl: stream.rtmp_server_url || 'rtmp://a.rtmp.youtube.com/live2',
+        streamKey: stream.stream_key,
+        destinations: stream.destinations,
+      });
+    } catch (error: any) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+
+    const streamStatus = String(stream.status || 'idle').toLowerCase();
+    const activeStatus = ['queued', 'starting', 'live', 'reconnecting'].includes(streamStatus);
+    const staleBefore = new Date(Date.now() - 30_000).toISOString();
+    const heartbeatIsStale = typeof stream.last_heartbeat === 'string'
+      && Number.isFinite(Date.parse(stream.last_heartbeat))
+      && Date.parse(stream.last_heartbeat) < Date.parse(staleBefore);
+    if (activeStatus && !heartbeatIsStale) {
+      return res.status(409).json({ success: false, error: `Stream is already ${stream.status}.` });
+    }
+    if (streamStatus === 'stopping' || (!activeStatus && !['idle', 'failed', 'error'].includes(streamStatus))) {
+      return res.status(409).json({ success: false, error: 'Stream is in a state that cannot be started safely.' });
+    }
+
+    if (!supabase && process.env.NODE_ENV === 'production') {
+      return res.status(503).json({ success: false, error: 'Distributed stream ownership requires the configured database.' });
+    }
+
+    claimToken = crypto.randomUUID();
+    const claimTimestamp = new Date().toISOString();
+    if (supabase) {
+      let claimed = false;
+      try {
+        claimed = await claimStreamOwnership(supabase, {
+          streamId: id,
+          token: claimToken,
+          now: Date.now(),
+          updates: {
+            status: 'starting',
+            last_heartbeat: claimTimestamp,
+            updated_at: claimTimestamp,
+          },
+        });
+      } catch {
+        return res.status(503).json({ success: false, error: 'Unable to claim this stream for a single broadcast owner.' });
+      }
+      if (!claimed) {
+        return res.status(409).json({ success: false, error: 'Another request or worker already owns this stream.' });
+      }
+    } else {
+      // Local fallback is supported only for a single non-production process.
+      localStartClaims.add(id);
+      localClaimed = true;
+      const streams = readLocalStreams();
+      const index = streams.findIndex((entry) => entry.id === id && entry.status === stream.status);
+      if (index === -1) {
+        localStartClaims.delete(id);
+        localClaimed = false;
+        return res.status(409).json({ success: false, error: 'Another request already changed this stream.' });
+      }
+      streams[index] = { ...streams[index], status: 'starting', worker_node_id: claimToken, last_heartbeat: claimTimestamp };
+      writeLocalStreams(streams);
     }
 
     // ------------------------------------------------------------------------
     // Plan-Based Dynamic Resource Allocation & Container Routing
     // ------------------------------------------------------------------------
-    const userId = req.headers['x-user-id'] as string;
-    const users = readLocalUsers();
-    const currentUser = (userId ? users.find((u) => u.id === userId) : null) ||
-      users.find((u) => u.subscription_status === 'active') || users[0];
-
-    const userTier: SubscriptionTier = (currentUser?.subscription_tier as SubscriptionTier) || 'free';
     const routing = clusterRegistry.routeStreamJob(userTier, id);
     const tierProfile = routing.profile;
     const assignedContainer = routing.container;
-
     const maxAllowedDestinations = tierProfile.maxDestinations;
 
-    // Collect destinations
-    const finalDestinationsList: string[] = [];
-    const primaryRtmp = `${(stream.rtmp_server_url || 'rtmp://a.rtmp.youtube.com/live2').replace(/\/+$/, '')}/${stream.stream_key}`;
-    finalDestinationsList.push(primaryRtmp);
-
-    if (Array.isArray(stream.destinations)) {
-      for (const dest of stream.destinations) {
-        if (dest.isEnabled && dest.rtmpServerUrl && dest.streamKey) {
-          const destUrl = `${dest.rtmpServerUrl.replace(/\/+$/, '')}/${dest.streamKey}`;
-          if (!finalDestinationsList.includes(destUrl) && finalDestinationsList.length < maxAllowedDestinations) {
-            finalDestinationsList.push(destUrl);
-          }
-        }
-      }
-    }
+    const sensitiveStreamValues: string[] = [
+      stream.stream_key,
+      ...(Array.isArray(stream.destinations) ? stream.destinations.map((destination: any) => destination?.streamKey) : []),
+    ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+    const finalDestinationsList = buildStreamDestinations({
+      rtmpServerUrl: stream.rtmp_server_url || 'rtmp://a.rtmp.youtube.com/live2',
+      streamKey: stream.stream_key,
+      destinations: stream.destinations,
+      subscriptionTier: userTier,
+    });
 
     const activeStorageAdapter = getStorageProvider();
     const initialLogs: string[] = [
@@ -3601,9 +3716,9 @@ app.post('/api/streams/:id/start', async (req, res) => {
       `[resource-profile] Allocated: ${tierProfile.cpuLimit} CPU / ${tierProfile.memoryLimitDisplay} RAM (Priority: Level ${tierProfile.priorityLevel})`,
       `[cgroup-quota] Threads: ${tierProfile.ffmpegThreads}, Linux Nice: ${tierProfile.containerNice}, Max Bitrate: ${tierProfile.maxBitrateKbps}kbps`,
       `[storage] Media Provider: ${activeStorageAdapter.providerType.toUpperCase()} (Bucket: ${activeStorageAdapter.bucketName})`,
-      `[source] Video input: ${stream.video_url}`,
+      `[source] Video input: ${sanitizeFfmpegDiagnostic(stream.video_url, { secrets: sensitiveStreamValues, maxLength: 300 })}`,
       `[multi-casting] Broadcasting simultaneously to ${finalDestinationsList.length} destination(s) [Tier Limit: ${maxAllowedDestinations}]`,
-      `[target] Primary: ${stream.rtmp_server_url || 'rtmp://a.rtmp.youtube.com/live2'} / ****${stream.stream_key.slice(-4)}`,
+      `[target] Primary server: ${sanitizeFfmpegDiagnostic(stream.rtmp_server_url || 'rtmp://a.rtmp.youtube.com/live2', { secrets: sensitiveStreamValues })}`,
       `[flags] Direct-Copy active (-re -stream_loop -1 -i <source> -c:v copy -c:a aac)`,
     ];
 
@@ -3633,7 +3748,7 @@ app.post('/api/streams/:id/start', async (req, res) => {
     let reconnectAttempts = 0;
 
     // Spawns FFmpeg with Zero-Lag and Low-Latency configuration
-    const spawnProcess = () => {
+    const spawnProcess = (): boolean => {
       try {
         const isVertical = stream.orientation === 'vertical';
         const isHttpSource = inputSource.startsWith('http://') || inputSource.startsWith('https://');
@@ -3717,35 +3832,56 @@ app.post('/api/streams/:id/start', async (req, res) => {
           );
         }
 
-        spawnedChild = spawn('ffmpeg', ffmpegArgs);
-        actualPid = spawnedChild.pid || null;
+        const child = spawn('ffmpeg', ffmpegArgs);
+        const childPid = child.pid || null;
+        if (!childPid) {
+          try { child.kill('SIGTERM'); } catch {}
+          throw new Error('FFmpeg did not return a process ID.');
+        }
+        spawnedChild = child;
+        actualPid = childPid;
 
         const currentActive = activeWorkerProcesses.get(id);
         if (currentActive) {
-          currentActive.child = spawnedChild;
-          currentActive.pid = actualPid;
+          if (currentActive.claimToken !== claimToken) {
+            try { child.kill('SIGTERM'); } catch {}
+            throw new Error('FFmpeg ownership changed before the process could be registered.');
+          }
+          currentActive.child = child;
+          currentActive.pid = childPid;
         }
 
-        spawnedChild.stderr?.on('data', (chunk) => {
+        child.stderr?.on('data', (chunk) => {
           const text = chunk.toString();
           const proc = activeWorkerProcesses.get(id);
-          if (proc) {
-            proc.logs.push(text.trim());
-            if (proc.logs.length > 100) proc.logs.shift();
+          if (proc && proc.claimToken === claimToken && proc.child === child) {
+            for (const diagnostic of extractFfmpegErrorLines(text, { secrets: sensitiveStreamValues })) {
+              proc.logs.push(`[ffmpeg] ${diagnostic}`);
+              if (proc.logs.length > 100) proc.logs.shift();
+            }
           }
         });
 
-        spawnedChild.on('error', (err) => {
-          console.warn(`[Stream ${id}] FFmpeg process notice: ${err.message}`);
+        child.on('error', (err) => {
+          const safeError = sanitizeChildProcessError(err, { secrets: sensitiveStreamValues });
+          console.warn(`[Stream ${id}] ${safeError}`);
           const proc = activeWorkerProcesses.get(id);
-          if (proc) {
-            proc.logs.push(`[error] FFmpeg process warning: ${err.message}`);
+          if (proc && proc.claimToken === claimToken && proc.child === child) {
+            proc.logs.push(`[error] ${safeError}`);
+            if (proc.logs.length > 100) proc.logs.shift();
+            void updateActiveClaimedStream(id, proc, {
+              status: 'ERROR',
+              ffmpeg_pid: null,
+              last_error: safeError,
+              updated_at: new Date().toISOString(),
+            }, true);
           }
         });
 
-        spawnedChild.on('exit', async (code, signal) => {
+        child.on('exit', async (code, signal) => {
           console.log(`[Stream ${id}] Process exited with code ${code}, signal ${signal}`);
           const proc = activeWorkerProcesses.get(id);
+          if (!proc || proc.claimToken !== claimToken || proc.child !== child) return;
 
           if (proc?.isIntentionalStop || (code === 0 && !signal)) {
             // Clean exit or user-requested stop
@@ -3753,13 +3889,12 @@ app.post('/api/streams/:id/start', async (req, res) => {
               clusterRegistry.releaseStreamJob(proc.containerId);
             }
             if (proc?.intervalId) clearInterval(proc.intervalId);
-            activeWorkerProcesses.delete(id);
-            const idleUpdate = { status: 'idle', ffmpeg_pid: null };
-            if (supabase) await supabase.from('streams').update(idleUpdate).eq('id', id);
-            else {
-              const list = readLocalStreams();
-              const sIdx = list.findIndex((s) => s.id === id);
-              if (sIdx !== -1) { list[sIdx] = { ...list[sIdx], ...idleUpdate }; writeLocalStreams(list); }
+            if (await updateActiveClaimedStream(id, proc, {
+              status: 'idle',
+              ffmpeg_pid: null,
+              updated_at: new Date().toISOString(),
+            }, true)) {
+              activeWorkerProcesses.delete(id);
             }
           } else {
             // Autonomous Auto-Recovery Mechanism
@@ -3771,45 +3906,78 @@ app.post('/api/streams/:id/start', async (req, res) => {
               console.warn(`[Stream ${id}] ${retryLog}`);
               proc.logs.push(`[auto-recovery] ${retryLog}`);
 
-              const reconnectingUpdate = { status: 'reconnecting', last_error: retryLog };
-              if (supabase) await supabase.from('streams').update(reconnectingUpdate).eq('id', id);
-              else {
-                const list = readLocalStreams();
-                const sIdx = list.findIndex((s) => s.id === id);
-                if (sIdx !== -1) { list[sIdx] = { ...list[sIdx], ...reconnectingUpdate }; writeLocalStreams(list); }
-              }
+              const stillOwnsStream = await updateActiveClaimedStream(id, proc, {
+                status: 'reconnecting',
+                last_error: retryLog,
+                last_heartbeat: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              });
+              if (!stillOwnsStream) return;
 
               proc.reconnectTimeout = setTimeout(() => {
-                if (!proc.isIntentionalStop) {
-                  spawnProcess();
+                if (!proc.isIntentionalStop && activeWorkerProcesses.get(id) === proc) {
+                  if (!spawnProcess()) {
+                    void updateActiveClaimedStream(id, proc, {
+                      status: 'ERROR',
+                      ffmpeg_pid: null,
+                      last_error: 'FFmpeg could not be restarted safely.',
+                      updated_at: new Date().toISOString(),
+                    }, true);
+                  }
                 }
               }, backoff);
             } else {
               // All 5 retries failed permanently
               console.error(`[Stream ${id}] All ${MAX_RESTART_RETRIES} restart retries permanently failed.`);
               if (proc?.intervalId) clearInterval(proc.intervalId);
-              activeWorkerProcesses.delete(id);
 
               const failureLog = `CRITICAL: FFmpeg process failed permanently after ${MAX_RESTART_RETRIES} auto-restart attempts. Exit code: ${code}. Network dropped or media source unreachable.`;
-              const errorUpdate = { status: 'ERROR', ffmpeg_pid: null, last_error: failureLog };
-              if (supabase) await supabase.from('streams').update(errorUpdate).eq('id', id);
-              else {
-                const list = readLocalStreams();
-                const sIdx = list.findIndex((s) => s.id === id);
-                if (sIdx !== -1) { list[sIdx] = { ...list[sIdx], ...errorUpdate }; writeLocalStreams(list); }
+              if (await updateActiveClaimedStream(id, proc, {
+                status: 'ERROR',
+                ffmpeg_pid: null,
+                last_error: failureLog,
+                updated_at: new Date().toISOString(),
+              }, true)) {
+                activeWorkerProcesses.delete(id);
               }
             }
           }
         });
+        return true;
       } catch (e: any) {
-        console.warn(`[FFmpeg invocation notice]: ${e.message}`);
+        console.warn(`[FFmpeg invocation notice]: ${sanitizeFfmpegDiagnostic(e?.message || e, { secrets: sensitiveStreamValues })}`);
+        return false;
       }
     };
 
-    spawnProcess();
-
-    if (!actualPid) {
-      actualPid = process.pid + Math.floor(Math.random() * 5000) + 100;
+    const activeClaimToken = claimToken;
+    if (!activeClaimToken) throw new Error('Stream ownership token was not created.');
+    const activeProcess: ActiveWorkerProcess = {
+      child: null,
+      pid: null,
+      claimToken: activeClaimToken,
+      startedAt: new Date(),
+      logs: initialLogs,
+      containerId: assignedContainer.id,
+      tier: userTier,
+      routingMetadata: routing.routingMetadata,
+      telemetry: {
+        bitrate_kbps: tierProfile.maxBitrateKbps,
+        fps: tierProfile.maxResolution.includes('60') ? 60.0 : 30.0,
+        dropped_frames: 0,
+        cpu_usage_pct: +(tierProfile.cpuCores * 0.35).toFixed(2),
+        mem_usage_mb: Math.round(tierProfile.memoryLimitMb * 0.4),
+        health_status: 'excellent',
+        speed: '1.00x',
+        uptime_seconds: 0,
+        destinations_count: finalDestinationsList.length,
+        timestamp: new Date().toISOString(),
+      },
+    };
+    activeWorkerProcesses.set(id, activeProcess);
+    if (!spawnProcess() || !actualPid) {
+      stopProcessAfterOwnershipLoss(id, activeProcess, 'FFmpeg could not be started');
+      throw new Error('FFmpeg could not be started safely.');
     }
 
     // Set up continuous heartbeat and metrics loop (Feeding real-time telemetry)
@@ -3855,42 +4023,15 @@ app.post('/api/streams/:id/start', async (req, res) => {
             mem_usage_mb: memUsage,
             ffmpeg_pid: actualPid,
           };
-          if (supabase) {
-            await supabase.from('streams').update(updatePayload).eq('id', id);
-          } else {
-            const list = readLocalStreams();
-            const sIdx = list.findIndex((s) => s.id === id);
-            if (sIdx !== -1) {
-              list[sIdx] = { ...list[sIdx], ...updatePayload };
-              writeLocalStreams(list);
-            }
-          }
+          await updateActiveClaimedStream(id, proc, {
+            ...updatePayload,
+            last_heartbeat: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          });
         }
       }
     }, 2000);
-
-    activeWorkerProcesses.set(id, {
-      child: spawnedChild,
-      pid: actualPid,
-      startedAt: new Date(),
-      logs: initialLogs,
-      intervalId,
-      containerId: assignedContainer.id,
-      tier: userTier,
-      routingMetadata: routing.routingMetadata,
-      telemetry: {
-        bitrate_kbps: tierProfile.maxBitrateKbps,
-        fps: tierProfile.maxResolution.includes('60') ? 60.0 : 30.0,
-        dropped_frames: 0,
-        cpu_usage_pct: +(tierProfile.cpuCores * 0.35).toFixed(2),
-        mem_usage_mb: Math.round(tierProfile.memoryLimitMb * 0.4),
-        health_status: 'excellent',
-        speed: '1.00x',
-        uptime_seconds: 0,
-        destinations_count: finalDestinationsList.length,
-        timestamp: new Date().toISOString(),
-      },
-    });
+    activeProcess.intervalId = intervalId;
 
     // Update database status with container and tier profile annotations
     const liveUpdate = {
@@ -3909,15 +4050,12 @@ app.post('/api/streams/:id/start', async (req, res) => {
       allocated_ram: tierProfile.memoryLimitDisplay,
     };
 
-    if (supabase) {
-      await supabase.from('streams').update(liveUpdate).eq('id', id);
-    } else {
-      const list = readLocalStreams();
-      const sIdx = list.findIndex((s) => s.id === id);
-      if (sIdx !== -1) {
-        list[sIdx] = { ...list[sIdx], ...liveUpdate };
-        writeLocalStreams(list);
-      }
+    if (!await updateActiveClaimedStream(id, activeProcess, {
+      ...liveUpdate,
+      last_heartbeat: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })) {
+      return res.status(409).json({ success: false, error: 'Stream ownership changed before FFmpeg could start.' });
     }
 
     return res.status(200).json({
@@ -3928,7 +4066,18 @@ app.post('/api/streams/:id/start', async (req, res) => {
       multiCastCount: finalDestinationsList.length,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    if (claimToken) {
+      try {
+        await updateClaimedStream(id, claimToken, {
+          status: 'ERROR',
+          ffmpeg_pid: null,
+          last_error: sanitizeFfmpegDiagnostic(err?.message || 'FFmpeg could not be started safely.'),
+          updated_at: new Date().toISOString(),
+        }, true);
+      } catch {}
+    }
+    if (localClaimed) localStartClaims.delete(id);
+    return res.status(500).json({ success: false, error: sanitizeFfmpegDiagnostic(err?.message || 'Unable to start stream.') });
   }
 });
 
@@ -4002,20 +4151,17 @@ app.post('/api/streams/:id/stop', async (req, res) => {
   const { id } = req.params;
   try {
     const active = activeWorkerProcesses.get(id);
-    if (active) {
-      active.isIntentionalStop = true;
-      if (active.containerId) {
-        clusterRegistry.releaseStreamJob(active.containerId);
-      }
-      if (active.reconnectTimeout) clearTimeout(active.reconnectTimeout);
-      if (active.intervalId) clearInterval(active.intervalId);
-      if (active.child) {
-        try {
-          active.child.kill('SIGTERM');
-        } catch (e) {}
-      }
-      activeWorkerProcesses.delete(id);
+    if (!active) {
+      return res.status(409).json({
+        success: false,
+        error: 'This runtime does not own the stream process, so it will not overwrite another owner\'s state.',
+      });
     }
+
+    active.isIntentionalStop = true;
+    if (active.reconnectTimeout) clearTimeout(active.reconnectTimeout);
+    if (active.intervalId) clearInterval(active.intervalId);
+    try { active.child?.kill('SIGTERM'); } catch {}
 
     const idleUpdate = {
       status: 'idle',
@@ -4027,16 +4173,11 @@ app.post('/api/streams/:id/stop', async (req, res) => {
       last_stopped_at: new Date().toISOString(),
     };
 
-    if (supabase) {
-      await supabase.from('streams').update(idleUpdate).eq('id', id);
-    } else {
-      const list = readLocalStreams();
-      const idx = list.findIndex((s) => s.id === id);
-      if (idx !== -1) {
-        list[idx] = { ...list[idx], ...idleUpdate };
-        writeLocalStreams(list);
-      }
+    if (!await updateActiveClaimedStream(id, active, idleUpdate, true)) {
+      return res.status(409).json({ success: false, error: 'Stream ownership changed before it could be stopped.' });
     }
+    if (active.containerId) clusterRegistry.releaseStreamJob(active.containerId);
+    activeWorkerProcesses.delete(id);
 
     return res.status(200).json({
       success: true,

@@ -90,6 +90,10 @@ const CURATED_LIBRARY: CuratedVideo[] = [
   },
 ];
 
+function isCompleteRtmpUrl(value: string): boolean {
+  return /^[a-z][a-z\d+.-]*:\/\//i.test(value.trim());
+}
+
 export const YOUTUBE_CATEGORIES: { id: StreamCategory; label: string; iconEmoji: string }[] = [
   { id: 'Entertainment', label: 'Entertainment', iconEmoji: '🎭' },
   { id: 'Gaming', label: 'Gaming', iconEmoji: '🎮' },
@@ -347,6 +351,14 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
       });
       return;
     }
+    if (isCompleteRtmpUrl(streamKey)) {
+      setConnectionTestStatus({
+        tested: true,
+        success: false,
+        message: 'Enter the stream key only, not a complete RTMP URL.',
+      });
+      return;
+    }
 
     setIsTestingConnection(true);
     setConnectionTestStatus(null);
@@ -377,6 +389,19 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
     }
     if (!streamKey.trim()) {
       setSubmitError('Please enter a stream key in Step 2.');
+      setStep(2);
+      return;
+    }
+    if (isCompleteRtmpUrl(streamKey)) {
+      setSubmitError('Enter the stream key only, not a complete RTMP URL.');
+      setStep(2);
+      return;
+    }
+    const invalidSecondaryKey = secondaryDestinations.some(
+      (destination) => destination.isEnabled && destination.streamKey?.trim() && isCompleteRtmpUrl(destination.streamKey),
+    );
+    if (invalidSecondaryKey) {
+      setSubmitError('Enter a stream key—not a complete RTMP URL—for each enabled destination.');
       setStep(2);
       return;
     }

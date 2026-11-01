@@ -19,7 +19,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 # Copy worker application source files
-COPY worker.js queue.js supabase.js storage.js healthcheck-worker.js ./
+COPY worker.js queue.js supabase.js storage.js healthcheck-worker.js r2ObjectUrl.js streamDestinations.js redisLease.js streamLeaseRunner.js streamDiagnostics.js streamOwnership.js ./
 
 # Set environment
 ENV NODE_ENV=production

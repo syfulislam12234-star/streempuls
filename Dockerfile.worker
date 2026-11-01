@@ -19,7 +19,7 @@ COPY backend/package*.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 # Copy worker application source files
-COPY backend/worker.js backend/queue.js backend/supabase.js backend/storage.js backend/healthcheck-worker.js ./
+COPY backend/worker.js backend/queue.js backend/supabase.js backend/storage.js backend/healthcheck-worker.js backend/r2ObjectUrl.js backend/streamDestinations.js backend/redisLease.js backend/streamLeaseRunner.js backend/streamDiagnostics.js backend/streamOwnership.js ./
 
 # Set environment
 ENV NODE_ENV=production

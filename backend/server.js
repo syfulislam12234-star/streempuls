@@ -8,6 +8,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { getR2Configuration } from './r2Config.js';
+import { validateStreamConfiguration } from './streamDestinations.js';
+import { enqueueStreamStart } from './streamStart.js';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -734,6 +736,12 @@ app.post('/api/streams', (req, res, next) => {
       });
     }
 
+    try {
+      validateStreamConfiguration(payload);
+    } catch (error) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+
     const userId = req.get('x-user-id');
     const user = getStreamUser(userId);
     const { channelLimit, destinationLimit } = getStreamLimits(user);
@@ -788,6 +796,15 @@ app.put('/api/streams/:id', (req, res, next) => {
     if (index === -1) return res.status(404).json({ success: false, error: 'Stream not found' });
 
     const patch = normalizeStreamPayload({ ...streams[index], ...req.body });
+    if (req.body?.streamKey !== undefined || req.body?.stream_key !== undefined
+      || req.body?.rtmpServerUrl !== undefined || req.body?.rtmp_server_url !== undefined
+      || req.body?.destinations !== undefined) {
+      try {
+        validateStreamConfiguration(patch);
+      } catch (error) {
+        return res.status(400).json({ success: false, error: error.message });
+      }
+    }
     if (patch.destinations.length > getStreamLimits(getStreamUser(req.get('x-user-id'))).destinationLimit) {
       return res.status(403).json({ success: false, error: 'Your plan destination limit was exceeded.' });
     }
@@ -822,47 +839,55 @@ app.delete('/api/streams/:id', (req, res, next) => {
 
 app.post('/api/streams/test-connection', (req, res) => {
   const { rtmpServerUrl = '', streamKey } = req.body || {};
-  if (typeof streamKey !== 'string' || !streamKey.trim()) {
-    return res.status(400).json({ success: false, error: 'A stream key is required' });
-  }
-  if (rtmpServerUrl && !/^rtmps?:\/\//i.test(rtmpServerUrl)) {
-    return res.status(400).json({ success: false, error: 'RTMP URL must start with rtmp:// or rtmps://' });
+  try {
+    validateStreamConfiguration({ rtmpServerUrl, streamKey });
+  } catch (error) {
+    return res.status(400).json({ success: false, error: error.message });
   }
   return res.status(200).json({ success: true, message: 'Destination is ready for streaming.' });
 });
 
 app.post('/api/streams/:id/start', async (req, res, next) => {
   try {
-    const streams = readStreams();
-    const index = streams.findIndex((stream) => stream.id === req.params.id);
-    if (index === -1) return res.status(404).json({ success: false, error: 'Stream not found' });
+    const { redisClient, streamQueue } = await import('./queue.js');
+    const result = await enqueueStreamStart({
+      redis: redisClient,
+      queue: streamQueue,
+      streamId: req.params.id,
+      getStream: () => readStreams().find((stream) => stream.id === req.params.id),
+      getSubscriptionTier: (stream) => getStreamUser(req.get('x-user-id') || stream.user_id)?.subscription_tier || 'free',
+      markStarting: (stream) => {
+        const streams = readStreams();
+        const index = streams.findIndex((item) => item.id === stream.id);
+        if (index === -1) throw new Error('Stream not found');
+        streams[index] = {
+          ...streams[index],
+          status: 'starting',
+          updated_at: new Date().toISOString(),
+          last_started_at: streams[index].last_started_at || new Date().toISOString(),
+        };
+        writeStreams(streams);
+      },
+    });
 
-    const stream = streams[index];
-    if (!stream.video_url || !stream.stream_key) {
+    if (result.kind === 'not-found') return res.status(404).json({ success: false, error: 'Stream not found' });
+    if (result.kind === 'invalid-stream') {
       return res.status(400).json({ success: false, error: 'Stream video URL and stream key are required before starting.' });
     }
+    if (result.kind === 'already-running') {
+      return res.status(409).json({ success: false, error: `Stream is already ${result.status}.` });
+    }
+    if (result.kind === 'request-in-progress') {
+      return res.status(409).json({ success: false, error: 'A start request for this stream is already being processed.' });
+    }
 
-    const { streamQueue } = await import('./queue.js');
-    const job = await streamQueue.add('start-stream', {
-      streamId: stream.id,
-      videoUrl: stream.video_url,
-      streamKey: stream.stream_key,
-      rtmpServerUrl: stream.rtmp_server_url,
-      destinations: stream.destinations,
-      subscriptionTier: getStreamUser(req.get('x-user-id') || stream.user_id)?.subscription_tier || 'free',
-      orientation: stream.orientation,
-      directCopyMode: stream.direct_copy_mode,
-      isLooping: stream.is_looping,
-    }, { jobId: `start-${stream.id}-${Date.now()}` });
-
-    streams[index] = {
-      ...stream,
+    return res.status(202).json({
+      success: true,
+      pid: null,
+      jobId: result.jobId,
       status: 'starting',
-      updated_at: new Date().toISOString(),
-      last_started_at: new Date().toISOString(),
-    };
-    writeStreams(streams);
-    return res.status(202).json({ success: true, pid: null, jobId: job.id, status: 'starting' });
+      alreadyQueued: result.kind === 'already-queued',
+    });
   } catch (error) {
     return next(error);
   }
