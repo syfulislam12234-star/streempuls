@@ -78,7 +78,6 @@ function readSiteContent() {
 
 const apiServer = createServer(app);
 let r2ClientPromise;
-let r2CorsConfigurationPromise;
 
 function logR2PresignError(error, req) {
   const metadata = error?.$metadata || {};
@@ -128,39 +127,6 @@ function getR2CorsOrigins() {
     .split(',')
     .map((origin) => origin.trim())
     .filter((origin) => origin && origin !== '*');
-}
-
-async function ensureR2BrowserCors() {
-  if (!r2CorsConfigurationPromise) {
-    r2CorsConfigurationPromise = (async () => {
-      const { PutBucketCorsCommand } = await import('@aws-sdk/client-s3');
-      const client = await getR2Client();
-      const { bucket } = getR2Configuration();
-      const corsOrigins = getR2CorsOrigins();
-
-      if (corsOrigins.length === 0) {
-        throw new Error('Set R2_CORS_ALLOWED_ORIGINS to the frontend origin, for example https://streempuls.mooo.com.');
-      }
-
-      await client.send(new PutBucketCorsCommand({
-        Bucket: bucket,
-        CORSConfiguration: {
-          CORSRules: [{
-            AllowedOrigins: corsOrigins,
-            AllowedMethods: ['PUT', 'GET', 'HEAD'],
-            AllowedHeaders: ['*'],
-            ExposeHeaders: ['ETag'],
-            MaxAgeSeconds: 3600,
-          }],
-        },
-      }));
-      console.log(`[Cloudflare R2] Browser CORS configured for ${corsOrigins.join(', ')} on bucket ${bucket}`);
-    })().catch((error) => {
-      r2CorsConfigurationPromise = null;
-      throw error;
-    });
-  }
-  return r2CorsConfigurationPromise;
 }
 
 function readUsers() {
@@ -325,10 +291,8 @@ app.post('/api/storage/presigned-upload', async (req, res, next) => {
     const key = `media/${Date.now()}-${randomUUID()}-${safeFileName}`;
     const ttl = Math.min(Math.max(Number(expiresIn) || 900, 60), 3600);
 
-    // R2 checks bucket CORS on the browser's preflight; CORS headers on this API
-    // response cannot grant PUT permission to the separate object-storage origin.
-    await ensureR2BrowserCors();
-
+    // Bucket CORS must be configured out-of-band; presigning should not require
+    // bucket-configuration permissions on the R2 upload credential.
     const client = await getR2Client();
     const { PutObjectCommand } = await import('@aws-sdk/client-s3');
     const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
