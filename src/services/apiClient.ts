@@ -302,6 +302,36 @@ export const API_BASE_URL: string =
     ? import.meta.env.VITE_API_BASE_URL.trim().replace(/\/+$/, '')
     : '';
 
+const AUTH_REQUIRED_MESSAGE = 'Your sign-in is missing or expired. Please sign in again, then retry the upload.';
+
+function getStoredAuthToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return localStorage.getItem('streempulse_auth_token')?.trim()
+      || localStorage.getItem('auth_token')?.trim()
+      || null;
+  } catch {
+    return null;
+  }
+}
+
+function saveAuthSession(data: any): UserProfile {
+  const token = typeof data?.accessToken === 'string' ? data.accessToken.trim()
+    : typeof data?.token === 'string' ? data.token.trim()
+    : '';
+  if (!token || !data?.user?.id) {
+    throw new Error('The server did not return a complete sign-in session. Please try signing in again.');
+  }
+
+  try {
+    localStorage.setItem('streempulse_auth_token', token);
+    localStorage.setItem('streempulse_user_id', data.user.id);
+  } catch {
+    throw new Error('Your browser could not save the sign-in session. Enable site storage and sign in again.');
+  }
+  return data.user;
+}
+
 function resolveApiUrl(input: RequestInfo | URL): RequestInfo | URL {
   if (typeof input !== 'string' || !input.startsWith('/api/')) return input;
   return API_BASE_URL ? `${API_BASE_URL}${input}` : input;
@@ -313,7 +343,13 @@ function fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> 
   const resolvedInput = resolveApiUrl(input);
   const isApiRequest = typeof input === 'string' && input.startsWith('/api/');
   const headers = new Headers(init?.headers);
-  if (isApiRequest && !headers.has('Accept')) headers.set('Accept', 'application/json');
+  if (isApiRequest) {
+    if (!headers.has('Accept')) headers.set('Accept', 'application/json');
+    if (!headers.has('Authorization')) {
+      const token = getStoredAuthToken();
+      if (token) headers.set('Authorization', `Bearer ${token}`);
+    }
+  }
 
   return globalThis.fetch(resolvedInput, { ...init, headers }).then((response) => {
     if (isApiRequest && response.headers.get('content-type')?.includes('text/html')) {
@@ -337,17 +373,17 @@ export function getAuthHeaders(extraHeaders?: Record<string, string>): Record<st
   };
 
   if (typeof window !== 'undefined') {
-    const token = localStorage.getItem('streampulse_auth_token') || localStorage.getItem('auth_token');
+    const token = getStoredAuthToken();
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
-    const adminKey = localStorage.getItem('streampulse_admin_key');
-    if (adminKey) {
-      headers['X-Admin-Api-Key'] = adminKey;
-    }
-    const userId = localStorage.getItem('streampulse_user_id');
-    if (userId && !headers['x-user-id']) {
-      headers['x-user-id'] = userId;
+    try {
+      const adminKey = localStorage.getItem('streempulse_admin_key');
+      if (adminKey) headers['X-Admin-Api-Key'] = adminKey;
+      const userId = localStorage.getItem('streempulse_user_id');
+      if (userId && !headers['x-user-id']) headers['x-user-id'] = userId;
+    } catch {
+      // Storage can be unavailable in restricted browser contexts.
     }
   }
 
@@ -372,6 +408,8 @@ export const apiClient = {
     return new Promise((resolve, reject) => {
       xhr.open('POST', resolveApiUrl('/api/upload') as string);
       xhr.setRequestHeader('Accept', 'application/json');
+      const token = getStoredAuthToken();
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
 
       if (onProgress && xhr.upload) {
         xhr.upload.onprogress = (event) => {
@@ -395,7 +433,9 @@ export const apiClient = {
             reject(e);
           }
         } else {
-          reject(new Error(`Server error ${xhr.status}: ${xhr.statusText}`));
+          reject(new Error(xhr.status === 401
+            ? AUTH_REQUIRED_MESSAGE
+            : `Server error ${xhr.status}: ${xhr.statusText}`));
         }
       };
 
@@ -421,7 +461,7 @@ export const apiClient = {
     const headers = getAuthHeaders();
     if (typeof window !== 'undefined' && !headers.Authorization) {
       try {
-        const token = localStorage.getItem('streempulse_auth_token') || localStorage.getItem('auth_token');
+        const token = getStoredAuthToken();
         if (token) headers.Authorization = `Bearer ${token}`;
       } catch {}
     }
@@ -433,6 +473,7 @@ export const apiClient = {
     });
     const data = await res.json();
     if (!res.ok || !data.success) {
+      if (res.status === 401) throw new Error(AUTH_REQUIRED_MESSAGE);
       throw new Error(data.error || 'Failed to generate presigned upload URL');
     }
     return data;
@@ -525,6 +566,7 @@ export const apiClient = {
     });
     const confirmData = await confirmRes.json();
     if (!confirmRes.ok || !confirmData.success || !confirmData.asset) {
+      if (confirmRes.status === 401) throw new Error(AUTH_REQUIRED_MESSAGE);
       throw new Error(confirmData.error || 'The R2 upload completed, but asset confirmation failed. Refresh the library before retrying.');
     }
     return confirmData.asset;
@@ -544,14 +586,11 @@ export const apiClient = {
 
   // 1b. Fetch stored media assets
   async getUploads(): Promise<UploadedAssetResponse[]> {
-    try {
-      const res = await fetch('/api/uploads', { headers: getAuthHeaders() });
-      if (!res.ok) throw new Error('Failed to fetch media uploads');
-      const data = await res.json();
-      return data.assets || [];
-    } catch (e) {
-      return [];
-    }
+    const res = await fetch('/api/uploads', { headers: getAuthHeaders() });
+    if (res.status === 401) throw new Error(AUTH_REQUIRED_MESSAGE);
+    if (!res.ok) throw new Error('Failed to fetch media uploads');
+    const data = await res.json();
+    return data.assets || [];
   },
 
   async getR2PreviewUrl(videoUrl: string): Promise<string | null> {
@@ -560,7 +599,13 @@ export const apiClient = {
       headers: getAuthHeaders(),
       body: JSON.stringify({ videoUrl }),
     });
-    if (res.status === 404) return null;
+    if (res.status === 404) {
+      if (videoUrl.includes('.r2.cloudflarestorage.com/')) {
+        throw new Error('This private R2 video is not available in your account.');
+      }
+      return null;
+    }
+    if (res.status === 401) throw new Error(AUTH_REQUIRED_MESSAGE);
     const data = await res.json();
     if (!res.ok || !data.success || typeof data.previewUrl !== 'string') {
       throw new Error(data.error || 'Could not create a secure video preview URL.');
@@ -851,15 +896,7 @@ export const apiClient = {
     });
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to register account');
-    if (data.accessToken || data.token) {
-      try {
-        localStorage.setItem('streempulse_auth_token', data.accessToken || data.token);
-      } catch {}
-    }
-    if (data.user?.id) {
-      this.setStoredUserId(data.user.id);
-    }
-    return data.user;
+    return saveAuthSession(data);
   },
 
   // 15. Sign in
@@ -871,15 +908,7 @@ export const apiClient = {
     });
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to sign in');
-    if (data.accessToken || data.token) {
-      try {
-        localStorage.setItem('streempulse_auth_token', data.accessToken || data.token);
-      } catch {}
-    }
-    if (data.user?.id) {
-      this.setStoredUserId(data.user.id);
-    }
-    return data.user;
+    return saveAuthSession(data);
   },
 
   // 15b. Sign out

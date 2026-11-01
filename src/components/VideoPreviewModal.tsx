@@ -14,16 +14,18 @@ export const VideoPreviewModal: React.FC<VideoPreviewModalProps> = ({
   onClose,
 }) => {
   const [playbackUrl, setPlaybackUrl] = useState('');
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   useEffect(() => {
     let isCurrent = true;
     setPlaybackUrl('');
+    setPreviewError(null);
     apiClient.getR2PreviewUrl(videoUrl.trim())
       .then((previewUrl) => {
         if (isCurrent) setPlaybackUrl(previewUrl || videoUrl.trim());
       })
-      .catch(() => {
-        if (isCurrent) setPlaybackUrl(videoUrl.trim());
+      .catch((error) => {
+        if (isCurrent) setPreviewError(error instanceof Error ? error.message : 'Sign in again to preview this private video.');
       });
 
     return () => {
@@ -56,7 +58,9 @@ export const VideoPreviewModal: React.FC<VideoPreviewModalProps> = ({
 
         {/* Video Player */}
         <div className="p-4 sm:p-6 bg-black flex items-center justify-center min-h-[220px]">
-          {playbackUrl ? (
+          {previewError ? (
+            <p role="alert" className="text-sm text-amber-300 text-center py-12">{previewError}</p>
+          ) : playbackUrl ? (
             <video
               src={playbackUrl}
               controls

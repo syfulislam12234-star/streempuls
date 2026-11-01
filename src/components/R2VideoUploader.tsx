@@ -115,7 +115,7 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
       }));
       setServerAssets(mapped);
     } catch (e) {
-      // Graceful fallback to default asset vault
+      setUploadError(e instanceof Error ? e.message : 'Could not load your private video library.');
     } finally {
       setIsLoadingAssets(false);
     }
@@ -408,6 +408,11 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
         {/* Tab 2: Supabase Storage Library */}
         {activeTab === 'library' && (
           <div className="p-6 overflow-y-auto space-y-4">
+            {uploadError && (
+              <p role="alert" className="text-xs text-amber-300 bg-amber-950/40 p-3 rounded-xl border border-amber-800">
+                {uploadError}
+              </p>
+            )}
             <div className="flex items-center justify-between">
               <p className="text-xs text-slate-400">
                 Select any stored video loop from your Supabase Storage bucket (<code className="text-emerald-400 font-mono">stream-assets</code>) to auto-populate the stream:

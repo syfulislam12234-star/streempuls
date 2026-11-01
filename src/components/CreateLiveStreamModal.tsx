@@ -133,6 +133,7 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
   const [userUploads, setUserUploads] = useState<any[]>([]);
   const [isInlinePreviewOpen, setIsInlinePreviewOpen] = useState(false);
   const [inlinePreviewUrl, setInlinePreviewUrl] = useState<string>('');
+  const [inlinePreviewError, setInlinePreviewError] = useState<string | null>(null);
 
   // Step 2: Destination State
   const [platform, setPlatform] = useState<'youtube' | 'custom'>('youtube');
@@ -229,23 +230,32 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
     if (isOpen) {
       apiClient.getUploads().then((items) => {
         if (Array.isArray(items)) setUserUploads(items);
-      }).catch(() => {});
+      }).catch((error) => {
+        setUploadError(error instanceof Error ? error.message : 'Could not load your private video library.');
+      });
     }
   }, [isOpen]);
 
   useEffect(() => {
     if (!isInlinePreviewOpen || !selectedVideoUrl.trim()) {
       setInlinePreviewUrl('');
+      setInlinePreviewError(null);
       return;
     }
 
     let isCurrent = true;
-    setInlinePreviewUrl(selectedVideoUrl);
+    setInlinePreviewError(null);
+    setInlinePreviewUrl('');
     apiClient.getR2PreviewUrl(selectedVideoUrl)
       .then((previewUrl) => {
-        if (isCurrent && previewUrl) setInlinePreviewUrl(previewUrl);
+        if (isCurrent) setInlinePreviewUrl(previewUrl || selectedVideoUrl);
       })
-      .catch(() => {});
+      .catch((error) => {
+        if (isCurrent) {
+          setInlinePreviewUrl('');
+          setInlinePreviewError(error instanceof Error ? error.message : 'Sign in again to preview this private video.');
+        }
+      });
 
     return () => {
       isCurrent = false;
@@ -559,6 +569,11 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
               {/* Mode A: Curated Library */}
               {videoSourceMode === 'library' && (
                 <div className="space-y-3">
+                  {uploadError && (
+                    <p role="alert" className="text-xs text-amber-300 bg-amber-950/40 p-3 rounded-xl border border-amber-800">
+                      {uploadError}
+                    </p>
+                  )}
                   <div className="flex items-center justify-between text-xs text-slate-400">
                     <span>Click a video clip to select it:</span>
                     <span>{CURATED_LIBRARY.length + userUploads.length} clips available</span>
@@ -770,12 +785,16 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
               {/* Inline video player element (only rendered when preview open and selectedVideoUrl exists) */}
               {isInlinePreviewOpen && Boolean(selectedVideoUrl?.trim()) && (
                 <div className="p-3 rounded-2xl bg-black border border-slate-800">
-                  <video
-                    src={(inlinePreviewUrl || selectedVideoUrl).trim()}
-                    controls
-                    loop
-                    className="w-full max-h-48 rounded-xl object-contain"
-                  />
+                  {inlinePreviewError ? (
+                    <p role="alert" className="text-xs text-amber-300 text-center py-8">{inlinePreviewError}</p>
+                  ) : inlinePreviewUrl ? (
+                    <video
+                      src={inlinePreviewUrl.trim()}
+                      controls
+                      loop
+                      className="w-full max-h-48 rounded-xl object-contain"
+                    />
+                  ) : null}
                 </div>
               )}
             </div>
