@@ -6,6 +6,8 @@ export interface StorageUploadedAsset {
   url: string;
   fileName: string;
   fileSizeMb: number;
+  sizeBytes?: number;
+  contentType?: string;
   durationSeconds: number;
   resolution: string;
   codec: string;
@@ -102,10 +104,12 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
         fileName: item.fileName,
         url: item.url,
         fileSizeMb: item.fileSizeMb,
+        sizeBytes: item.sizeBytes,
+        contentType: item.contentType,
         durationSeconds: 120,
-        resolution: item.resolution || '1920x1080 (60 fps)',
-        codec: item.codec || 'H.264 / AAC (Direct Copy Ready)',
-        previewUrl: item.url,
+        resolution: item.resolution || 'Not analyzed',
+        codec: item.codec || 'Not analyzed',
+        previewUrl: item.previewUrl || item.url,
         titleSuggestion: item.titleSuggestion,
         storageProvider: item.storageProvider || 'Supabase Storage (stream-assets)',
       }));
@@ -137,6 +141,7 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
 
     const localBlobUrl = URL.createObjectURL(file);
     const sizeInMb = +(file.size / (1024 * 1024)).toFixed(1);
+    const contentType = file.type || 'video/mp4';
     const cleanTitle = file.name
       .replace(/\.[^/.]+$/, '')
       .replace(/[-_]/g, ' ')
@@ -164,6 +169,8 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
         fileName: response.fileName,
         url: response.url,
         fileSizeMb: response.fileSizeMb || sizeInMb,
+        sizeBytes: response.sizeBytes || file.size,
+        contentType: response.contentType || contentType,
         durationSeconds: 120,
         resolution: response.resolution || '1920x1080 (60fps source)',
         codec: response.codec || 'H.264 / AAC (Direct Copy Ready)',
@@ -297,7 +304,7 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
                         Direct-to-Cloudflare R2 Presigned Upload &middot; Bypasses Backend Server &middot; Direct Copy (-c:v copy) Ready
                       </p>
                     </div>
-                    <span className="text-xs px-3 py-1 rounded-full bg-slate-800 text-slate-300 font-mono">
+                      <span className="text-xs px-3 py-1 rounded-full bg-slate-800 text-slate-300 font-mono">
                       Browse Files (.mp4, .m4v)
                     </span>
                   </div>
@@ -325,7 +332,7 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
                 <div className="p-4 rounded-2xl bg-emerald-950/30 border border-emerald-800/50 flex items-center justify-between">
                   <div className="flex items-center space-x-2 text-xs font-semibold text-emerald-300">
                     <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                    <span>Upload Successful &mdash; Direct-Copy Verified</span>
+                    <span>Upload Confirmed &mdash; Private R2 Object</span>
                   </div>
                   <span className="text-[11px] font-mono text-emerald-400">Bucket: stream-assets</span>
                 </div>
@@ -356,7 +363,7 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
                   </div>
                   <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800">
                     <span className="text-[10px] text-slate-500 block">Codec Profile</span>
-                    <span className="text-emerald-400 font-semibold">H.264 / AAC</span>
+                    <span className="text-emerald-400 font-semibold">{uploadedAsset.codec}</span>
                   </div>
                   <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800">
                     <span className="text-[10px] text-slate-500 block">FFmpeg Load</span>
@@ -364,9 +371,9 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
                   </div>
                 </div>
 
-                {/* Supabase Storage Public Endpoint URL */}
+                {/* Private R2 object reference kept separate from the temporary preview URL */}
                 <div className="p-3 rounded-xl bg-slate-950 border border-slate-800/90 font-mono text-xs">
-                  <span className="text-slate-500 text-[10px] block mb-1">Supabase Storage Public URL:</span>
+                  <span className="text-slate-500 text-[10px] block mb-1">Private R2 object URL (stream source):</span>
                   <input
                     type="text"
                     readOnly

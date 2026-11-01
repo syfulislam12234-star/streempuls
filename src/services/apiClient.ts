@@ -276,7 +276,11 @@ export interface SystemSettingsRecord {
 export interface UploadedAssetResponse {
   fileName: string;
   fileSizeMb: number;
+  sizeBytes?: number;
+  contentType?: string;
   url: string;
+  previewUrl?: string;
+  key?: string;
   storageProvider: string;
   resolution: string;
   codec: string;
@@ -507,37 +511,23 @@ export const apiClient = {
       .replace(/[-_]/g, ' ')
       .replace(/\b\w/g, (c) => c.toUpperCase());
 
-    try {
-      const confirmRes = await fetch('/api/storage/confirm-upload', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({
-          key: presigned.key,
-          fileName: file.name,
-          fileSizeMb,
-          publicUrl: presigned.publicUrl,
-          provider: presigned.provider,
-          resolution: '1920x1080 (60fps source)',
-          codec: 'H.264 / AAC (Direct Copy Ready)',
-          titleSuggestion: `${cleanTitle} 24/7 Live Stream`,
-        }),
-      });
-
-      if (confirmRes.ok) {
-        const confirmData = await confirmRes.json();
-        if (confirmData.asset) return confirmData.asset;
-      }
-    } catch {}
-
-    return {
-      fileName: file.name,
-      fileSizeMb,
-      url: presigned.publicUrl,
-      storageProvider: 'Cloudflare R2 (Direct Bucket Stream)',
-      resolution: '1920x1080 (60fps source)',
-      codec: 'H.264 / AAC (Direct Copy Ready)',
-      titleSuggestion: `${cleanTitle} 24/7 Live Stream`,
-    };
+    const confirmRes = await fetch('/api/storage/confirm-upload', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({
+        key: presigned.key,
+        fileName: file.name,
+        fileSizeMb,
+        publicUrl: presigned.publicUrl,
+        provider: presigned.provider,
+        titleSuggestion: `${cleanTitle} 24/7 Live Stream`,
+      }),
+    });
+    const confirmData = await confirmRes.json();
+    if (!confirmRes.ok || !confirmData.success || !confirmData.asset) {
+      throw new Error(confirmData.error || 'The R2 upload completed, but asset confirmation failed. Refresh the library before retrying.');
+    }
+    return confirmData.asset;
   },
 
   // 1e. Get dynamic cluster routing status & auto-scaling report
@@ -555,13 +545,27 @@ export const apiClient = {
   // 1b. Fetch stored media assets
   async getUploads(): Promise<UploadedAssetResponse[]> {
     try {
-      const res = await fetch('/api/uploads');
+      const res = await fetch('/api/uploads', { headers: getAuthHeaders() });
       if (!res.ok) throw new Error('Failed to fetch media uploads');
       const data = await res.json();
       return data.assets || [];
     } catch (e) {
       return [];
     }
+  },
+
+  async getR2PreviewUrl(videoUrl: string): Promise<string | null> {
+    const res = await fetch('/api/storage/preview-url', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ videoUrl }),
+    });
+    if (res.status === 404) return null;
+    const data = await res.json();
+    if (!res.ok || !data.success || typeof data.previewUrl !== 'string') {
+      throw new Error(data.error || 'Could not create a secure video preview URL.');
+    }
+    return data.previewUrl;
   },
 
   // 2. Fetch all streams (resilient with local cache fallback)

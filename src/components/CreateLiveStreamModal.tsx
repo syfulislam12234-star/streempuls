@@ -132,6 +132,7 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [userUploads, setUserUploads] = useState<any[]>([]);
   const [isInlinePreviewOpen, setIsInlinePreviewOpen] = useState(false);
+  const [inlinePreviewUrl, setInlinePreviewUrl] = useState<string>('');
 
   // Step 2: Destination State
   const [platform, setPlatform] = useState<'youtube' | 'custom'>('youtube');
@@ -231,6 +232,25 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
       }).catch(() => {});
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isInlinePreviewOpen || !selectedVideoUrl.trim()) {
+      setInlinePreviewUrl('');
+      return;
+    }
+
+    let isCurrent = true;
+    setInlinePreviewUrl(selectedVideoUrl);
+    apiClient.getR2PreviewUrl(selectedVideoUrl)
+      .then((previewUrl) => {
+        if (isCurrent && previewUrl) setInlinePreviewUrl(previewUrl);
+      })
+      .catch(() => {});
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [isInlinePreviewOpen, selectedVideoUrl]);
 
   if (!isOpen) return null;
 
@@ -751,7 +771,7 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
               {isInlinePreviewOpen && Boolean(selectedVideoUrl?.trim()) && (
                 <div className="p-3 rounded-2xl bg-black border border-slate-800">
                   <video
-                    src={selectedVideoUrl.trim()}
+                    src={(inlinePreviewUrl || selectedVideoUrl).trim()}
                     controls
                     loop
                     className="w-full max-h-48 rounded-xl object-contain"

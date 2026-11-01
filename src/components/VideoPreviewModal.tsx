@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { X, Play } from 'lucide-react';
+import { apiClient } from '../services/apiClient';
 
 interface VideoPreviewModalProps {
   title: string;
@@ -12,6 +13,24 @@ export const VideoPreviewModal: React.FC<VideoPreviewModalProps> = ({
   videoUrl,
   onClose,
 }) => {
+  const [playbackUrl, setPlaybackUrl] = useState('');
+
+  useEffect(() => {
+    let isCurrent = true;
+    setPlaybackUrl('');
+    apiClient.getR2PreviewUrl(videoUrl.trim())
+      .then((previewUrl) => {
+        if (isCurrent) setPlaybackUrl(previewUrl || videoUrl.trim());
+      })
+      .catch(() => {
+        if (isCurrent) setPlaybackUrl(videoUrl.trim());
+      });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [videoUrl]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
       <div className="w-full max-w-2xl rounded-2xl bg-slate-900 border border-slate-800 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -37,9 +56,9 @@ export const VideoPreviewModal: React.FC<VideoPreviewModalProps> = ({
 
         {/* Video Player */}
         <div className="p-4 sm:p-6 bg-black flex items-center justify-center min-h-[220px]">
-          {videoUrl && videoUrl.trim() ? (
+          {playbackUrl ? (
             <video
-              src={videoUrl.trim()}
+              src={playbackUrl}
               controls
               autoPlay
               loop

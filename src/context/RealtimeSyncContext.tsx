@@ -82,11 +82,12 @@ export const RealtimeSyncProvider: React.FC<{ children: React.ReactNode }> = ({ 
   useEffect(() => {
     refreshAllConfigs();
 
-    // Check if Supabase client can be initialized from env or defaults
-    const supabaseUrl = (import.meta as any).env?.VITE_SUPABASE_URL || 'https://wkchgdchgeormxvvlude.supabase.co';
-    const supabaseAnonKey = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || 'placeholder-anon-key';
+    // Supabase browser settings are injected at frontend build time.
+    const supabaseUrl = (import.meta as any).env?.VITE_SUPABASE_URL?.trim() || '';
+    const supabaseAnonKey = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY?.trim() || '';
+    const hasPlaceholderConfig = /placeholder|your[_ -]/i.test(`${supabaseUrl} ${supabaseAnonKey}`);
 
-    if (supabaseUrl && supabaseAnonKey && !supabaseUrl.includes('placeholder')) {
+    if (supabaseUrl && supabaseAnonKey && !hasPlaceholderConfig) {
       try {
         const client = createClient(supabaseUrl, supabaseAnonKey);
         supabaseRef.current = client;

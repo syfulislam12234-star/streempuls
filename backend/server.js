@@ -15,6 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || path.resolve(__dirname, '../data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const STREAMS_FILE = path.join(DATA_DIR, 'streams.json');
+const UPLOADED_ASSETS_FILE = path.join(DATA_DIR, 'uploaded_assets.json');
 const DIST_DIR = path.resolve(__dirname, '../dist');
 const UPLOADS_DIR = path.resolve(__dirname, '../uploads');
 const PAYMENT_SETTINGS_FILE = path.join(DATA_DIR, 'payment_settings.json');
@@ -202,6 +203,40 @@ function safeUser(user) {
   return profile;
 }
 
+function getAuthenticatedUser(req) {
+  const bearerToken = req.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  if (!bearerToken) return null;
+
+  const tokenHash = createHash('sha256').update(bearerToken).digest('hex');
+  return readUsers().find((user) => user.auth_token_hash === tokenHash) || null;
+}
+
+function readUploadedAssets() {
+  const assets = readJsonFile(UPLOADED_ASSETS_FILE, []);
+  return Array.isArray(assets) ? assets : [];
+}
+
+function getR2PublicObjectUrl(key) {
+  const { accountId, bucket } = getR2Configuration();
+  const publicDomain = process.env.CLOUDFLARE_R2_PUBLIC_DOMAIN?.trim();
+  const baseUrl = publicDomain
+    ? `https://${publicDomain.replace(/^https?:\/\//, '').replace(/\/+$/, '')}`
+    : `https://${bucket}.${accountId}.r2.cloudflarestorage.com`;
+  return `${baseUrl}/${key.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+async function createR2PreviewUrl(key) {
+  const client = await getR2Client();
+  const { bucket } = getR2Configuration();
+  const { GetObjectCommand } = await import('@aws-sdk/client-s3');
+  const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
+  return getSignedUrl(
+    client,
+    new GetObjectCommand({ Bucket: bucket, Key: key }),
+    { expiresIn: 600 },
+  );
+}
+
 function verifyPassword(user, password) {
   if (typeof user.password_hash === 'string' && typeof user.password_salt === 'string') {
     try {
@@ -261,6 +296,9 @@ app.get('/api/site-content', (_req, res, next) => {
 
 app.post('/api/storage/presigned-upload', async (req, res, next) => {
   try {
+    const user = getAuthenticatedUser(req);
+    if (!user) return res.status(401).json({ success: false, error: 'Authentication required.' });
+
     const {
       fileName,
       contentType = 'video/mp4',
@@ -287,10 +325,21 @@ app.post('/api/storage/presigned-upload', async (req, res, next) => {
       return res.status(403).json({ success: false, error: 'This frontend origin is not allowed to upload directly to Cloudflare R2.' });
     }
 
-    const { bucket, accountId } = getR2Configuration();
+    const { bucket } = getR2Configuration();
     const safeFileName = path.basename(fileName.trim()).replace(/[^a-zA-Z0-9._-]/g, '_');
     const key = `media/${Date.now()}-${randomUUID()}-${safeFileName}`;
     const ttl = Math.min(Math.max(Number(expiresIn) || 900, 60), 3600);
+
+    const assets = readUploadedAssets();
+    assets.unshift({
+      key,
+      ownerUserId: user.id,
+      fileName: safeFileName,
+      contentType,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    });
+    writeJsonFile(UPLOADED_ASSETS_FILE, assets);
 
     // Bucket CORS must be configured out-of-band; presigning should not require
     // bucket-configuration permissions on the R2 upload credential.
@@ -303,10 +352,7 @@ app.post('/api/storage/presigned-upload', async (req, res, next) => {
       { expiresIn: ttl, signableHeaders: new Set(['content-type']) },
     );
 
-    const publicDomain = process.env.CLOUDFLARE_R2_PUBLIC_DOMAIN;
-    const publicUrl = publicDomain
-      ? `https://${publicDomain.replace(/^https?:\/\//, '').replace(/\/+$/, '')}/${key}`
-      : `https://${bucket}.${accountId}.r2.cloudflarestorage.com/${key}`;
+    const publicUrl = getR2PublicObjectUrl(key);
 
     return res.status(200).json({
       success: true,
@@ -336,6 +382,124 @@ app.post('/api/storage/presigned-upload', async (req, res, next) => {
       code: error?.code || error?.Code || 'R2_PRESIGN_FAILED',
       requestId: error?.$metadata?.requestId || error?.$metadata?.extendedRequestId || undefined,
     });
+  }
+});
+
+app.post('/api/storage/confirm-upload', async (req, res, next) => {
+  try {
+    const user = getAuthenticatedUser(req);
+    if (!user) return res.status(401).json({ success: false, error: 'Authentication required.' });
+
+    const key = typeof req.body?.key === 'string' ? req.body.key.trim() : '';
+    if (!key || !key.startsWith('media/') || key.split('/').some((part) => part === '..')) {
+      return res.status(400).json({ success: false, error: 'A valid uploaded R2 key is required.' });
+    }
+
+    const assets = readUploadedAssets();
+    const assetIndex = assets.findIndex((asset) => asset.key === key && asset.ownerUserId === user.id);
+    if (assetIndex === -1) {
+      return res.status(404).json({ success: false, error: 'Upload not found for this user.' });
+    }
+
+    const { bucket } = getR2Configuration();
+    const client = await getR2Client();
+    const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
+    const object = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+    const contentLength = Number(object.ContentLength);
+    const contentType = String(object.ContentType || '').split(';', 1)[0].trim().toLowerCase();
+    if (!Number.isSafeInteger(contentLength) || contentLength <= 0 || contentLength > 5_000_000_000) {
+      return res.status(422).json({ success: false, error: 'R2 object size is missing or outside the supported upload limit.' });
+    }
+    if (!/^video\/[a-z0-9.+-]+$/i.test(contentType)) {
+      return res.status(422).json({ success: false, error: 'R2 object does not have a supported video Content-Type.' });
+    }
+    if (contentType !== assets[assetIndex].contentType.toLowerCase()) {
+      return res.status(422).json({ success: false, error: 'R2 object Content-Type does not match the presigned upload.' });
+    }
+
+    const cleanTitle = assets[assetIndex].fileName.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ');
+    const asset = {
+      ...assets[assetIndex],
+      status: 'confirmed',
+      sizeBytes: contentLength,
+      fileSizeMb: +(contentLength / (1024 * 1024)).toFixed(1),
+      contentType,
+      url: getR2PublicObjectUrl(key),
+      storageProvider: 'Cloudflare R2 (Private)',
+      resolution: 'Not analyzed',
+      codec: 'Not analyzed',
+      titleSuggestion: cleanTitle || assets[assetIndex].fileName,
+      updatedAt: new Date().toISOString(),
+    };
+    assets[assetIndex] = asset;
+    writeJsonFile(UPLOADED_ASSETS_FILE, assets);
+
+    const {
+      ownerUserId: _ownerUserId,
+      status: _status,
+      ...clientAsset
+    } = asset;
+    return res.status(200).json({
+      success: true,
+      asset: { ...clientAsset, previewUrl: await createR2PreviewUrl(key) },
+      message: 'Video upload confirmed and registered in the media catalog.',
+    });
+  } catch (error) {
+    if (error?.name === 'NotFound' || error?.$metadata?.httpStatusCode === 404) {
+      return res.status(404).json({ success: false, error: 'Uploaded R2 object was not found.' });
+    }
+    return next(error);
+  }
+});
+
+app.get('/api/uploads', async (req, res, next) => {
+  try {
+    const user = getAuthenticatedUser(req);
+    if (!user) return res.status(401).json({ success: false, error: 'Authentication required.' });
+
+    const assets = readUploadedAssets().filter(
+      (asset) => asset.status === 'confirmed' && asset.ownerUserId === user.id,
+    );
+    const responseAssets = await Promise.all(assets.map(async (asset) => ({
+      fileName: asset.fileName,
+      key: asset.key,
+      sizeBytes: asset.sizeBytes,
+      fileSizeMb: asset.fileSizeMb,
+      contentType: asset.contentType,
+      url: asset.url,
+      previewUrl: await createR2PreviewUrl(asset.key),
+      storageProvider: asset.storageProvider,
+      resolution: asset.resolution,
+      codec: asset.codec,
+      titleSuggestion: asset.titleSuggestion,
+      createdAt: asset.createdAt,
+    })));
+    return res.status(200).json({ success: true, assets: responseAssets });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/storage/preview-url', async (req, res, next) => {
+  try {
+    const user = getAuthenticatedUser(req);
+    if (!user) return res.status(401).json({ success: false, error: 'Authentication required.' });
+
+    const videoUrl = typeof req.body?.videoUrl === 'string' ? req.body.videoUrl.trim() : '';
+    if (!videoUrl) return res.status(400).json({ success: false, error: 'videoUrl is required.' });
+
+    const asset = readUploadedAssets().find(
+      (item) => item.status === 'confirmed' && item.ownerUserId === user.id && item.url === videoUrl,
+    );
+    if (!asset) return res.status(404).json({ success: false, error: 'Uploaded video not found for this user.' });
+
+    return res.status(200).json({
+      success: true,
+      previewUrl: await createR2PreviewUrl(asset.key),
+      expiresInSeconds: 600,
+    });
+  } catch (error) {
+    return next(error);
   }
 });
 
