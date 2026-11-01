@@ -538,14 +538,8 @@ app.post('/api/notifications/:id/read', (req, res, next) => {
 });
 
 app.get('/api/auth/me', (req, res) => {
-  const users = readUsers();
-  const bearerToken = req.get('authorization')?.replace(/^Bearer\s+/i, '');
-  const requestedUserId = req.get('x-user-id');
-  const tokenHash = bearerToken ? createHash('sha256').update(bearerToken).digest('hex') : null;
-  const user = (tokenHash && users.find((candidate) => candidate.auth_token_hash === tokenHash))
-    || users.find((candidate) => candidate.id === requestedUserId)
-    || (!requestedUserId && !bearerToken ? users[0] : null);
-  if (!user) return res.status(404).json({ success: false, error: 'No user session found' });
+  const user = getAuthenticatedUser(req);
+  if (!user) return res.status(401).json({ success: false, error: 'Authentication required.' });
   return res.json({ success: true, user: safeUser(user) });
 });
 

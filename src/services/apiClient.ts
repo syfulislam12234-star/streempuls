@@ -894,9 +894,9 @@ export const apiClient = {
   // 16. Get current authenticated user profile
   async getCurrentUser(userId?: string): Promise<UserProfile | null> {
     try {
-      const activeId = userId || this.getStoredUserId();
-      const headers: Record<string, string> = {};
-      if (activeId) headers['x-user-id'] = activeId;
+      // The server resolves identity from the verified bearer token, not a user ID.
+      void userId;
+      const headers = getAuthHeaders();
       const res = await fetch('/api/auth/me', { headers });
       if (res.ok) {
         const data = await res.json();

@@ -49,13 +49,17 @@ async function postJson(baseUrl, route, body, token) {
 }
 
 async function registerUser(baseUrl, name) {
-  const response = await postJson(baseUrl, '/api/auth/register', {
+  const credentials = {
     email: `${name}@example.test`,
     password: 'a-test-password-only',
     full_name: name,
+  };
+  const response = await postJson(baseUrl, '/api/auth/register', {
+    ...credentials,
   });
   assert.equal(response.status, 201);
-  return (await response.json()).token;
+  const data = await response.json();
+  return { token: data.token, userId: data.user.id, credentials };
 }
 
 test('direct R2 upload, confirmation, private preview, and per-user asset isolation', async (t) => {
@@ -148,8 +152,22 @@ test('direct R2 upload, confirmation, private preview, and per-user asset isolat
 
   const baseUrl = `http://127.0.0.1:${apiPort}`;
   await waitForApi(api, baseUrl);
-  const ownerToken = await registerUser(baseUrl, 'owner');
-  const otherToken = await registerUser(baseUrl, 'other');
+  const { userId: ownerUserId, credentials: ownerCredentials } = await registerUser(baseUrl, 'owner');
+  const { credentials: otherCredentials } = await registerUser(baseUrl, 'other');
+  const ownerLogin = await postJson(baseUrl, '/api/auth/login', ownerCredentials);
+  const otherLogin = await postJson(baseUrl, '/api/auth/login', otherCredentials);
+  assert.equal(ownerLogin.status, 200);
+  assert.equal(otherLogin.status, 200);
+  const ownerToken = (await ownerLogin.json()).token;
+  const otherToken = (await otherLogin.json()).token;
+
+  const anonymousSession = await fetch(`${baseUrl}/api/auth/me`);
+  assert.equal(anonymousSession.status, 401, 'an anonymous request must not be assigned the first user');
+  const forgedSession = await fetch(`${baseUrl}/api/auth/me`, { headers: { 'X-User-Id': ownerUserId } });
+  assert.equal(forgedSession.status, 401, 'a user ID header must not authenticate a session');
+  const authenticatedSession = await fetch(`${baseUrl}/api/auth/me`, { headers: { Authorization: `Bearer ${ownerToken}` } });
+  assert.equal(authenticatedSession.status, 200);
+  assert.equal((await authenticatedSession.json()).user.id, ownerUserId);
 
   const forgedUserHeader = await fetch(`${baseUrl}/api/uploads`, { headers: { 'X-User-Id': 'some-user' } });
   assert.equal(forgedUserHeader.status, 401, 'client-supplied user IDs must not authenticate asset access');
@@ -159,6 +177,9 @@ test('direct R2 upload, confirmation, private preview, and per-user asset isolat
     preferredProvider: 'r2',
   });
   assert.equal(unauthenticatedPresign.status, 401, 'presigning must require a verified bearer token');
+  assert.equal((await postJson(baseUrl, '/api/storage/confirm-upload', { key: 'media/unowned.mp4' })).status, 401);
+  assert.equal((await fetch(`${baseUrl}/api/uploads`)).status, 401);
+  assert.equal((await postJson(baseUrl, '/api/storage/preview-url', { videoUrl: 'https://example.test/video.mp4' })).status, 401);
 
   const presignResponse = await postJson(baseUrl, '/api/storage/presigned-upload', {
     fileName: 'owner-video.mp4',

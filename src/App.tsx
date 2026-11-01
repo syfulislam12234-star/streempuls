@@ -126,18 +126,10 @@ function MainApp() {
   const refreshUser = useCallback(async () => {
     try {
       const user = await apiClient.getCurrentUser();
-      if (user) {
-        setCurrentUser(user);
-      } else {
-        // Fallback default unpaid user profile to enforce post-login guard
-        const fallbackUsers = await apiClient.getUsers();
-        if (fallbackUsers.length > 0) {
-          setCurrentUser(fallbackUsers[0]);
-          apiClient.setStoredUserId(fallbackUsers[0].id);
-        }
-      }
+      setCurrentUser(user);
     } catch (e) {
       console.warn('[StreamPulse Auth] Error fetching current user:', e);
+      setCurrentUser(null);
     } finally {
       setIsLoadingUser(false);
     }
