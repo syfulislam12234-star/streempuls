@@ -620,43 +620,147 @@ async function launchFfmpegStream(job, lease, abortSignal) {
 
       currentChild.on('error', (err) => {
         const safeError = sanitizeChildProcessError(err, { secrets: sensitiveValues });
-        console.error(`[FFmpeg Child Error] Stream ${streamId}: ${safeError}`);
-        handleProcessCrash(new Error(safeError), null, null);
+        const errorMsg = `FFmpeg child process error: ${safeError}`;
+        console.error(`[FFmpeg Child Error] Stream ${streamId}: ${errorMsg}`);
+        // Clear 'starting' state and mark as failed
+        try {
+          void updateOwnedStream({
+            status: 'failed',
+            last_error: errorMsg,
+            ffmpeg_pid: null,
+            updated_at: new Date().toISOString(),
+          }, true);
+        } catch {}
+        try {
+          void redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
+            streamId,
+            status: 'failed',
+            health_status: 'error',
+            last_error: errorMsg,
+            timestamp: new Date().toISOString(),
+          }));
+          void redisClient.publish('stream-telemetry-events', JSON.stringify({
+            streamId,
+            status: 'failed',
+            health_status: 'error',
+            last_error: errorMsg,
+            timestamp: new Date().toISOString(),
+          }));
+        } catch {}
       });
 
       currentChild.on('exit', async (code, signal) => {
         if (leaseLostError) return;
+        // Always clear the 'starting' state regardless of outcome
+        try {
+          await updateOwnedStream({
+            status: 'idle',
+            ffmpeg_pid: null,
+            last_error: null,
+            updated_at: new Date().toISOString(),
+          }, true);
+        } catch {}
+        // Also publish clearing the starting state via Redis
+        try {
+          void redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
+            streamId,
+            status: 'idle',
+            health_status: 'warning',
+            bitrate_kbps: 0,
+            fps: 0,
+            timestamp: new Date().toISOString(),
+          }));
+          void redisClient.publish('stream-telemetry-events', JSON.stringify({
+            streamId,
+            status: 'idle',
+            health_status: 'warning',
+            bitrate_kbps: 0,
+            fps: 0,
+            timestamp: new Date().toISOString(),
+          }));
+        } catch {}
+
         if (streamController.isIntentionalStop || isTerminated || (code === 0 && !signal)) {
-          // Intentional stop or clean normal completion
-          activeStreams.delete(streamId);
-          abortSignal?.removeEventListener('abort', handleAbort);
-          const released = await updateOwnedStream({
-              status: 'idle',
-              ffmpeg_pid: null,
-              updated_at: new Date().toISOString(),
-            }, true)
-            .catch(() => false);
-          if (!released) {
-            await handleLeaseLoss(new Error('Distributed stream ownership was lost during FFmpeg cleanup.'));
-            return;
-          }
+          // Success: FFmpeg exited cleanly or was intentionally stopped
           try {
-            await redisClient.publish('stream-telemetry-events', JSON.stringify({
+            void updateOwnedStream({
+              status: 'live',
+              ffmpeg_pid: null,
+              last_heartbeat: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            }, true);
+          } catch {}
+          try {
+            void redisClient.publish('stream-telemetry-events', JSON.stringify({
               streamId,
-              status: 'idle',
-              health_status: 'warning',
+              status: 'live',
+              health_status: 'excellent',
               bitrate_kbps: 0,
               fps: 0,
               timestamp: new Date().toISOString(),
             }));
-          } catch (pubErr) {
-            console.warn(`[Redis Notice] Failed publishing idle for ${streamId}:`, pubErr.message);
-          }
+          } catch {}
+          console.log(`[FFmpeg Exit] Stream ${streamId} live (exit code: ${code}, signal: ${signal})`);
           resolve();
         } else {
-          // Unexpected crash, non-zero exit code, or network drop -> Autonomous Auto-Recovery
-          handleProcessCrash(new Error(`FFmpeg exited with code ${code}, signal ${signal}`), code, signal);
+          // Failure: unexpected crash, non-zero exit code, or network drop
+          const exitMsg = `FFmpeg exited with code ${code}, signal ${signal}`;
+          console.error(`[FFmpeg Exit Error] Stream ${streamId}: ${exitMsg}`);
+          try {
+            void updateOwnedStream({
+              status: 'failed',
+              last_error: exitMsg,
+              ffmpeg_pid: null,
+              updated_at: new Date().toISOString(),
+            }, true);
+          } catch {}
+          try {
+            void redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
+              streamId,
+              status: 'failed',
+              health_status: 'error',
+              last_error: exitMsg,
+              timestamp: new Date().toISOString(),
+            }));
+            void redisClient.publish('stream-telemetry-events', JSON.stringify({
+              streamId,
+              status: 'failed',
+              health_status: 'error',
+              last_error: exitMsg,
+              timestamp: new Date().toISOString(),
+            }));
+          } catch {}
         }
+      });
+      currentChild.on('close', (code) => {
+        // Always clear the 'starting' state on close
+        try {
+          void updateOwnedStream({
+            status: 'idle',
+            ffmpeg_pid: null,
+            last_error: null,
+            updated_at: new Date().toISOString(),
+          }, true);
+        } catch {}
+        try {
+          void redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
+            streamId,
+            status: 'idle',
+            health_status: 'warning',
+            bitrate_kbps: 0,
+            fps: 0,
+            timestamp: new Date().toISOString(),
+          }));
+          void redisClient.publish('stream-telemetry-events', JSON.stringify({
+            streamId,
+            status: 'idle',
+            health_status: 'warning',
+            bitrate_kbps: 0,
+            fps: 0,
+            timestamp: new Date().toISOString(),
+          }));
+        } catch {}
+        console.log(`[FFmpeg Close] Stream ${streamId} starting state cleared (close code: ${code})`);
       });
     }
 

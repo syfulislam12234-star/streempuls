@@ -1,6 +1,7 @@
 import { withRedisLease } from './redisLease.js';
 
 const START_REQUEST_LOCK_TTL_MS = 30_000;
+const STALE_START_TIMEOUT_MS = 30_000 // 30 seconds - same as lock TTL, can be configured separately
 const ACTIVE_STREAM_STATUSES = new Set(['queued', 'starting', 'live', 'reconnecting', 'stopping']);
 const ACTIVE_JOB_STATES = new Set(['active', 'wait', 'waiting', 'delayed', 'paused', 'waiting-children', 'prioritized']);
 const TERMINAL_JOB_STATES = new Set(['completed', 'failed']);
@@ -31,6 +32,25 @@ export async function enqueueStreamStart({
   getSubscriptionTier,
   markStarting,
 }) {
+  // Check for stale "starting" state - if stream has been starting for too long,
+  // reset it so a new start can be attempted.
+  const stream = await getStream();
+  if (stream && stream.status === 'starting') {
+    const startedAt = stream.updated_at ? new Date(stream.updated_at).getTime() : 0;
+    const now = Date.now();
+    const age = now - startedAt;
+    if (age > STALE_START_TIMEOUT_MS) {
+      // Reset the status to allow a new start attempt
+      // We need to set status back to idle or null; using 'idle' as it's a valid non-starting state
+      try {
+        await supabase.from('streams').update({ status: 'idle' }).eq('id', streamId);
+        console.log(`[streamStart] Reset stale starting state for stream ${streamId} (age: ${age}ms)`);
+      } catch (e) {
+        console.warn(`[streamStart] Failed to reset stale state for ${streamId}:`, e);
+      }
+    }
+  }
+
   const lockKey = `streempulse:start-request:${streamId}`;
   const result = await withRedisLease(redis, lockKey, async () => {
     const stream = await getStream();

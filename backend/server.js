@@ -1133,6 +1133,29 @@ async function attachStreamStatusBridge() {
 
 attachStreamStatusBridge().catch(() => {});
 
+// Boot-time reset: clear any streams stuck in 'starting' status
+// This prevents streams from remaining in 'starting' indefinitely if the worker crashed before FFmpeg started
+try {
+  const streams = readStreams();
+  const resetStreams = streams.filter((s) => s.status !== 'starting');
+  const restartedCount = streams.length - resetStreams.length;
+  if (restartedCount > 0) {
+    for (const s of streams) {
+      if (s.status === 'starting') {
+        s.status = 'idle';
+        s.ffmpeg_pid = null;
+        s.last_error = null;
+        s.updated_at = new Date().toISOString();
+        s.restarted_at = new Date().toISOString();
+      }
+    }
+    writeStreams(streams);
+    console.log(`[Boot] Reset ${restartedCount} stream(s) stuck in 'starting' status`);
+  }
+} catch (err) {
+  console.warn('[Boot] Failed to reset stuck streams:', err?.message || err);
+}
+
 apiServer.listen(PORT, () => {
   console.log(`[API] Express server listening on port ${PORT}`);
   console.log(`[WebSocket] Public sync endpoint available at /ws/sync on port ${PORT}`);
