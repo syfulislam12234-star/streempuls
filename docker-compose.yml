@@ -12,7 +12,7 @@ services:
       redis-server 
       --appendonly yes 
       --maxmemory 1024mb 
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy noeviction
     volumes:
       - redis-data:/data
     networks:
@@ -121,6 +121,7 @@ services:
       - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
       - SUPABASE_STORAGE_BUCKET=${SUPABASE_STORAGE_BUCKET:-stream-assets}
       - CLOUDFLARE_R2_ACCOUNT_ID=${CLOUDFLARE_R2_ACCOUNT_ID:-}
+      - CLEAN_QUEUE=${CLEAN_QUEUE:-false}
       - CLOUDFLARE_R2_ACCESS_KEY_ID=${CLOUDFLARE_R2_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}
       - CLOUDFLARE_R2_SECRET_ACCESS_KEY=${CLOUDFLARE_R2_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}
       - CLOUDFLARE_R2_ENDPOINT=${CLOUDFLARE_R2_ENDPOINT:-}

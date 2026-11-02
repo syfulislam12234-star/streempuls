@@ -344,11 +344,16 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           updated_at: new Date().toISOString(),
         }, true);
       } catch {}
+      try {
+        await releaseStreamLockAndReset(streamId, 'idle');
+      } catch {}
       reject(new Error(safeError));
     };
 
     lease?.onLost(handleLeaseLoss);
-    if (lease?.lost) void handleLeaseLoss(new Error('Distributed stream lock was lost.'));
+    if (lease?.lost) {
+      void handleLeaseLoss(new Error('Distributed stream lock was lost.'));
+    }
 
     activeStreams.set(streamId, streamController);
 
@@ -680,8 +685,38 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           }));
         } catch {}
 
-        if (streamController.isIntentionalStop || isTerminated || (code === 0 && !signal)) {
-          // Success: FFmpeg exited cleanly or was intentionally stopped
+        if (streamController.isIntentionalStop || isTerminated) {
+          // Stream was intentionally stopped or terminated - mark as idle, not live
+          try {
+            void updateOwnedStream({
+              status: 'idle',
+              ffmpeg_pid: null,
+              last_error: null,
+              updated_at: new Date().toISOString(),
+            }, true);
+          } catch {}
+          try {
+            void redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
+              streamId,
+              status: 'idle',
+              health_status: 'warning',
+              bitrate_kbps: 0,
+              fps: 0,
+              timestamp: new Date().toISOString(),
+            }));
+            void redisClient.publish('stream-telemetry-events', JSON.stringify({
+              streamId,
+              status: 'idle',
+              health_status: 'warning',
+              bitrate_kbps: 0,
+              fps: 0,
+              timestamp: new Date().toISOString(),
+            }));
+          } catch {}
+          console.log(`[FFmpeg Exit] Stream ${streamId} idle (intentionally stopped/terminated)`);
+          resolve();
+        } else if (code === 0 && !signal) {
+          // Success: FFmpeg exited cleanly with exit code 0 and no signal
           try {
             void updateOwnedStream({
               status: 'live',
@@ -857,7 +892,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
 
         try {
           const released = await updateOwnedStream({
-            status: 'ERROR',
+            status: 'failed',
             ffmpeg_pid: null,
             reconnect_attempts: reconnectAttempts,
             last_error: permanentFailureLog,
@@ -883,7 +918,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           try {
             await redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
               streamId,
-              status: 'ERROR',
+              status: 'failed',
               health_status: 'error',
               reconnectAttempts,
               maxRetries: MAX_RESTART_RETRIES,
@@ -892,7 +927,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
             }));
             await redisClient.publish('stream-telemetry-events', JSON.stringify({
               streamId,
-              status: 'ERROR',
+              status: 'failed',
               health_status: 'error',
               last_error: permanentFailureLog,
               timestamp: new Date().toISOString(),
@@ -1088,6 +1123,13 @@ async function shutdownWorker(signal) {
     stopStreamProcess(streamId, `Worker container recycle (${signal})`)
   );
 
+  // Also release Redis locks and reset Supabase status for all streams
+  await Promise.all(
+    Array.from(activeStreams.keys()).map((streamId) =>
+      releaseStreamLockAndReset(streamId, 'idle')
+    )
+  );
+
   await Promise.all(stopPromises);
 
   // All stream processors have now settled, so close can drain safely.
@@ -1102,6 +1144,46 @@ async function shutdownWorker(signal) {
 
   console.log('[Shutdown] All worker resources cleaned up. Exiting process.');
   process.exit(signal === 'MEMORY_CEILING_GUARD' ? 1 : 0);
+}
+
+// Helper: release Redis lease and reset Supabase stream status
+async function releaseStreamLockAndReset(streamId, status = 'idle', errorMsg = null) {
+  try {
+    // Release Redis lease if it exists
+    const leaseKey = `streempulse:active-stream:${streamId}`;
+    try {
+      await redisClient.del(leaseKey);
+    } catch {}
+    // Publish telemetry event for dashboard
+    try {
+      await redisClient.publish('stream-telemetry-events', JSON.stringify({
+        streamId,
+        status,
+        health_status: errorMsg ? 'error' : 'warning',
+        last_error: errorMsg || null,
+        timestamp: new Date().toISOString(),
+      }));
+    } catch {}
+  } catch {}
+}
+
+// Helper: reset all streams stuck in 'starting' or 'queued' at boot
+async function resetStuckStreams() {
+  try {
+    const streams = readStreams?.() || [];
+    for (const s of streams) {
+      if (s.status === 'starting' || s.status === 'queued') {
+        s.status = 'idle';
+        s.ffmpeg_pid = null;
+        s.last_error = null;
+        s.updated_at = new Date().toISOString();
+        await writeStreams(streams);
+        console.log(`[Boot] Reset stream ${s.id} from '${s.status}' to 'idle'`);
+      }
+    }
+  } catch (err) {
+    console.warn('[Boot] Failed to reset stuck streams:', err?.message || err);
+  }
 }
 
 process.on('SIGTERM', () => shutdownWorker('SIGTERM'));
