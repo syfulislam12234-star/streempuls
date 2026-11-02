@@ -95,9 +95,14 @@ export function buildStreamDestinations({
 }
 
 /** @param {StreamConfiguration} [configuration] */
-export function validateStreamConfiguration({ rtmpServerUrl, streamKey, destinations = [] } = {}) {
-  validateRtmpServerUrl(rtmpServerUrl || DEFAULT_RTMP_SERVER_URL);
-  validateStreamKey(streamKey);
+export function validateStreamConfiguration({ rtmpServerUrl, streamKey, stream_key, destinations = [] } = {}) {
+  // Accept streamKey from top-level, or from destinations[0], or from stream_key (with underscore)
+  const actualStreamKey = streamKey || (destinations.length > 0 ? destinations[0].streamKey : stream_key);
+  // Accept rtmpServerUrl from top-level, or from destinations[0], or default
+  const actualRtmpServerUrl = rtmpServerUrl || (destinations.length > 0 ? destinations[0].rtmpServerUrl : undefined) || DEFAULT_RTMP_SERVER_URL;
+
+  validateRtmpServerUrl(actualRtmpServerUrl);
+  validateStreamKey(actualStreamKey);
 
   for (const destination of Array.isArray(destinations) ? destinations : []) {
     if (!destination?.isEnabled) continue;

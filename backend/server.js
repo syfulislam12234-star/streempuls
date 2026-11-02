@@ -737,7 +737,11 @@ app.post('/api/streams', (req, res, next) => {
     }
 
     try {
-      validateStreamConfiguration(payload);
+      validateStreamConfiguration({
+        rtmpServerUrl: payload.rtmp_server_url,
+        streamKey: payload.stream_key,
+        destinations: payload.destinations,
+      });
     } catch (error) {
       return res.status(400).json({ success: false, error: error.message });
     }
