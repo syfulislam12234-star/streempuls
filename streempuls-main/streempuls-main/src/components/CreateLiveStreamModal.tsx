@@ -171,6 +171,7 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const thumbInputRef = useRef<HTMLInputElement>(null);
+  const streamKeyRef = useRef<string>('');
 
   // Initialize or prefill state
   useEffect(() => {
@@ -353,10 +354,12 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
   // Submit and optionally auto-start
   const handleSubmit = async (autoStart: boolean) => {
     // Diagnostic: check stream key state before submission
-    const keyExists = !!streamKey;
-    const keyLength = streamKey?.length || 0;
+    // Use ref value as fallback if state is empty (handles state persistence across steps)
+    const effectiveKey = streamKey || streamKeyRef.current || '';
+    const keyExists = !!effectiveKey;
+    const keyLength = effectiveKey?.length || 0;
     // Ensure stream key is trimmed and non-empty before proceeding
-    const trimmedKey = streamKey?.trim() || '';
+    const trimmedKey = effectiveKey?.trim() || '';
     if (!trimmedKey) {
       setSubmitError('Please enter a stream key in Step 2.');
       setStep(2);
@@ -364,15 +367,10 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
     }
     logStreamKeyState();
     // Debug: log submitting streamKey value (length only, never the actual key)
-    console.log('Submitting streamKey: exists=', !!streamKey, 'length=', streamKey?.length);
+    console.log('Submitting streamKey: exists=', keyExists, 'length=', keyLength);
     if (!selectedVideoUrl) {
       setSubmitError('Please choose a video in Step 1.');
       setStep(1);
-      return;
-    }
-    if (!streamKey.trim()) {
-      setSubmitError('Please enter a stream key in Step 2.');
-      setStep(2);
       return;
     }
     if (!streamTitle.trim()) {
@@ -859,6 +857,7 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
                     onChange={(e) => {
                       const newValue = e.target.value;
                       setStreamKey(newValue);
+                      streamKeyRef.current = newValue;  // Store in ref for fallback
                       setConnectionTestStatus(null);
                       logStreamKeyState();
                     }}
