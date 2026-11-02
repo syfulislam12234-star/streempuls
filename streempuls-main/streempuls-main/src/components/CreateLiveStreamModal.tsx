@@ -247,6 +247,18 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
     }
   };
 
+  // Diagnostic logging for stream key state
+  const logStreamKeyState = () => {
+    // Log only whether key exists and its length, never the actual key value
+    const keyExists = !!streamKey;
+    const keyLength = streamKey?.length || 0;
+    if (keyExists || keyLength > 0) {
+      // Avoid console spam - only log on significant state changes
+      // Commented out for production; enable temporarily for debugging
+      // console.log('StreamKey state: exists=', keyExists, 'length=', keyLength);
+    }
+  };
+
   // Upload handler
   const handleFileUpload = async (file: File) => {
     if (!file.name.match(/\.(mp4|mov|mkv|m4v)$/i)) {
@@ -340,6 +352,17 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
 
   // Submit and optionally auto-start
   const handleSubmit = async (autoStart: boolean) => {
+    // Diagnostic: check stream key state before submission
+    const keyExists = !!streamKey;
+    const keyLength = streamKey?.length || 0;
+    // Ensure stream key is trimmed and non-empty before proceeding
+    const trimmedKey = streamKey?.trim() || '';
+    if (!trimmedKey) {
+      setSubmitError('Please enter a stream key in Step 2.');
+      setStep(2);
+      return;
+    }
+    logStreamKeyState();
     if (!selectedVideoUrl) {
       setSubmitError('Please choose a video in Step 1.');
       setStep(1);
@@ -375,7 +398,7 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
           description: descriptionToUse,
           videoUrl: selectedVideoUrl,
           thumbnailUrl: thumbnailUrl.trim() || undefined,
-          streamKey: streamKey.trim(),
+          streamKey: trimmedKey,
           rtmpServerUrl: streamUrl.trim(),
           isLooping,
           orientation,
@@ -391,7 +414,7 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
           description: descriptionToUse,
           videoUrl: selectedVideoUrl,
           thumbnailUrl: thumbnailUrl.trim() || undefined,
-          streamKey: streamKey.trim(),
+          streamKey: trimmedKey,
           rtmpServerUrl: streamUrl.trim(),
           isLooping,
           orientation,
@@ -832,8 +855,10 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
                     type={isKeyVisible ? 'text' : 'password'}
                     value={streamKey}
                     onChange={(e) => {
-                      setStreamKey(e.target.value);
+                      const newValue = e.target.value;
+                      setStreamKey(newValue);
                       setConnectionTestStatus(null);
+                      logStreamKeyState();
                     }}
                     placeholder="Paste your stream key here"
                     className="w-full pl-4 pr-11 py-3 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs font-mono focus:border-red-500 focus:outline-none transition-colors"
@@ -1796,7 +1821,8 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
                     setUploadError('Please select or upload a video clip to proceed.');
                     return;
                   }
-                  if (step === 2 && !streamKey.trim()) {
+                  const trimmedKey = streamKey?.trim() || '';
+                  if (step === 2 && !trimmedKey) {
                     setConnectionTestStatus({
                       tested: true,
                       success: false,
@@ -1804,6 +1830,7 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
                     });
                     return;
                   }
+                  logStreamKeyState();
                   setStep((step + 1) as any);
                 }}
                 disabled={(step === 1 && !selectedVideoUrl) || (step === 2 && !streamKey.trim())}

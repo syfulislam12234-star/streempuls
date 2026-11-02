@@ -891,8 +891,15 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
                     type={isKeyVisible ? 'text' : 'password'}
                     value={streamKey}
                     onChange={(e) => {
-                      setStreamKey(e.target.value);
+                      const keyValue = e.target.value;
+                      setStreamKey(keyValue);
                       setConnectionTestStatus(null);
+                      // Diagnostic: log key state (empty/length only, never the actual key)
+                      if (keyValue === null || keyValue === undefined) {
+                        console.log('Stream key input: value is null/undefined');
+                      } else {
+                        console.log('Stream key input: length = ' + keyValue.length + ', trimmedLength = ' + keyValue.trim().length);
+                      }
                     }}
                     placeholder="Paste your stream key here"
                     className="w-full pl-4 pr-11 py-3 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs font-mono focus:border-red-500 focus:outline-none transition-colors"
