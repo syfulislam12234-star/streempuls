@@ -387,11 +387,6 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
       setStep(1);
       return;
     }
-    if (!streamKey.trim()) {
-      setSubmitError('Please enter a stream key in Step 2.');
-      setStep(2);
-      return;
-    }
     if (isCompleteRtmpUrl(streamKey)) {
       setSubmitError('Enter the stream key only, not a complete RTMP URL.');
       setStep(2);
