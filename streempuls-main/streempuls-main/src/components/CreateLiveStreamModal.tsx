@@ -363,6 +363,8 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
       return;
     }
     logStreamKeyState();
+    // Debug: log submitting streamKey value (length only, never the actual key)
+    console.log('Submitting streamKey: exists=', !!streamKey, 'length=', streamKey?.length);
     if (!selectedVideoUrl) {
       setSubmitError('Please choose a video in Step 1.');
       setStep(1);
