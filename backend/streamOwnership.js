@@ -23,6 +23,56 @@ export function hasFreshHeartbeat(value, {
   return timestamp !== null && timestamp >= now - staleAfterMs;
 }
 
+export function isStaleHeartbeat(value, options = {}) {
+  return !hasFreshHeartbeat(value, options);
+}
+
+/**
+ * Clear only stale active records for one owner. Each update is fenced by the
+ * exact row state observed, so a fresh worker cannot be released accidentally.
+ * @param {any} database
+ * @param {{ userId: string, exceptStreamId?: string | null, now?: number, staleAfterMs?: number }} options
+ */
+export async function reconcileStaleStreamRecords(database, {
+  userId,
+  exceptStreamId = null,
+  now = Date.now(),
+  staleAfterMs = DEFAULT_STALE_AFTER_MS,
+} = {}) {
+  if (!database?.from || typeof userId !== 'string' || !userId) return 0;
+
+  const { data: rows, error: lookupError } = await database
+    .from('streams')
+    .select('id,user_id,status,worker_node_id,last_heartbeat')
+    .eq('user_id', userId)
+    .in('status', ['queued', 'starting', 'live', 'reconnecting']);
+  if (lookupError) throw lookupError;
+
+  let cleared = 0;
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (row.id === exceptStreamId || !isStaleHeartbeat(row.last_heartbeat, { now, staleAfterMs })) continue;
+
+    let query = database.from('streams').update({
+      status: 'idle',
+      ffmpeg_pid: null,
+      worker_node_id: null,
+      last_error: 'Previous stream owner heartbeat expired; stale state reclaimed.',
+      updated_at: new Date(now).toISOString(),
+    }).eq('id', row.id).eq('user_id', userId).eq('status', row.status);
+    query = row.worker_node_id
+      ? query.eq('worker_node_id', row.worker_node_id)
+      : query.is('worker_node_id', null);
+    query = row.last_heartbeat
+      ? query.eq('last_heartbeat', row.last_heartbeat)
+      : query.is('last_heartbeat', null);
+
+    const { data, error } = await query.select('id').maybeSingle();
+    if (error) throw error;
+    if (data) cleared++;
+  }
+  return cleared;
+}
+
 /**
  * Atomically claim a persisted stream record. The conditional update prevents
  * two runtimes that observed the same row from both becoming owners.

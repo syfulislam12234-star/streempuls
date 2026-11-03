@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   claimStreamOwnership,
   hasFreshHeartbeat,
+  isStaleHeartbeat,
   updateStreamWhenOwned,
 } from '../streamOwnership.js';
 
@@ -105,4 +106,12 @@ test('only an expired owner can be replaced and a valid heartbeat remains protec
     now,
   }), true);
   assert.equal(database.row.worker_node_id, 'replacement-owner');
+});
+
+test('missing and malformed heartbeats are stale while recent heartbeats are fresh', () => {
+  const now = Date.now();
+  assert.equal(isStaleHeartbeat(null, { now }), true);
+  assert.equal(isStaleHeartbeat('not-a-timestamp', { now }), true);
+  assert.equal(isStaleHeartbeat(new Date(now - 31_000).toISOString(), { now }), true);
+  assert.equal(isStaleHeartbeat(new Date(now - 1_000).toISOString(), { now }), false);
 });

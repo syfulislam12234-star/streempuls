@@ -22,7 +22,7 @@ import {
 import { fileURLToPath } from 'url';
 import { extractFfmpegErrorLines, sanitizeChildProcessError, sanitizeFfmpegDiagnostic } from './backend/streamDiagnostics.js';
 import { buildStreamDestinations, validateStreamConfiguration } from './backend/streamDestinations.js';
-import { claimStreamOwnership, updateStreamWhenOwned } from './backend/streamOwnership.js';
+import { claimStreamOwnership, isStaleHeartbeat, reconcileStaleStreamRecords, updateStreamWhenOwned } from './backend/streamOwnership.js';
 import {
   clusterRegistry,
   TIER_RESOURCE_PROFILES,
@@ -3638,10 +3638,10 @@ app.post('/api/streams/:id/start', async (req, res) => {
 
     const streamStatus = String(stream.status || 'idle').toLowerCase();
     const activeStatus = ['queued', 'starting', 'live', 'reconnecting'].includes(streamStatus);
-    const staleBefore = new Date(Date.now() - 30_000).toISOString();
-    const heartbeatIsStale = typeof stream.last_heartbeat === 'string'
-      && Number.isFinite(Date.parse(stream.last_heartbeat))
-      && Date.parse(stream.last_heartbeat) < Date.parse(staleBefore);
+    const heartbeatIsStale = isStaleHeartbeat(stream.last_heartbeat, {
+      now: Date.now(),
+      staleAfterMs: 30_000,
+    });
     if (activeStatus && !heartbeatIsStale) {
       return res.status(409).json({ success: false, error: `Stream is already ${stream.status}.` });
     }
@@ -3651,6 +3651,18 @@ app.post('/api/streams/:id/start', async (req, res) => {
 
     if (!supabase && process.env.NODE_ENV === 'production') {
       return res.status(503).json({ success: false, error: 'Distributed stream ownership requires the configured database.' });
+    }
+
+    if (supabase && typeof stream.user_id === 'string' && stream.user_id) {
+      try {
+        await reconcileStaleStreamRecords(supabase, {
+          userId: stream.user_id,
+          exceptStreamId: id,
+          staleAfterMs: 30_000,
+        });
+      } catch {
+        return res.status(503).json({ success: false, error: 'Unable to reconcile stale stream ownership before starting.' });
+      }
     }
 
     claimToken = crypto.randomUUID();
