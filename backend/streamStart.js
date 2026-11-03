@@ -1,4 +1,24 @@
 import { withRedisLease } from './redisLease.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = path.resolve(__dirname, '..', 'data');
+const STREAMS_FILE = path.join(DATA_DIR, 'streams.json');
+
+function readJsonFile(filePath, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonFile(filePath, value) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2), 'utf8');
+}
 
 const START_REQUEST_LOCK_TTL_MS = 30_000;
 const STALE_START_TIMEOUT_MS = 30_000 // 30 seconds - same as lock TTL, can be configured separately
@@ -31,35 +51,53 @@ export async function enqueueStreamStart({
   getStream,
   getSubscriptionTier,
   markStarting,
+  authorizeStream = async () => true,
+  ensureStreamRecord = async () => {},
 }) {
-  // Check for stale "starting" state - if stream has been starting for too long,
-  // reset it so a new start can be attempted.
-  const stream = await getStream();
-  if (stream && stream.status === 'starting') {
-    const startedAt = stream.updated_at ? new Date(stream.updated_at).getTime() : 0;
-    const now = Date.now();
-    const age = now - startedAt;
-    if (age > STALE_START_TIMEOUT_MS) {
-      // Reset the status to allow a new start attempt
-      // We need to set status back to idle or null; using 'idle' as it's a valid non-starting state
-      try {
-        await supabase.from('streams').update({ status: 'idle' }).eq('id', streamId);
-        console.log(`[streamStart] Reset stale starting state for stream ${streamId} (age: ${age}ms)`);
-      } catch (e) {
-        console.warn(`[streamStart] Failed to reset stale state for ${streamId}:`, e);
-      }
-    }
-  }
-
   const lockKey = `streempulse:start-request:${streamId}`;
   const result = await withRedisLease(redis, lockKey, async () => {
     const stream = await getStream();
     if (!stream) return { kind: 'not-found' };
+    if (!await authorizeStream(stream)) return { kind: 'not-found' };
+
+if (stream && stream.status === 'starting') {
+      const startedAt = stream.updated_at ? new Date(stream.updated_at).getTime() : 0;
+      const now = Date.now();
+      const age = now - startedAt;
+      if (age > STALE_START_TIMEOUT_MS) {
+        // Reset the status to allow a new start attempt
+        // Update the authoritative JSON store (same as API endpoints and markStarting use)
+        try {
+          const streams = readJsonFile(STREAMS_FILE, []);
+          const index = streams.findIndex((s) => s.id === streamId);
+          if (index !== -1) {
+            streams[index].status = 'idle';
+            streams[index].updated_at = new Date().toISOString();
+            // Preserve last_started_at if it exists, otherwise set to current time
+            if (streams[index].last_started_at) {
+              streams[index].last_started_at = new Date(streams[index].last_started_at).toISOString();
+            } else {
+              streams[index].last_started_at = new Date().toISOString();
+            }
+            writeJsonFile(STREAMS_FILE, streams);
+            stream.status = 'idle';
+            stream.updated_at = streams[index].updated_at;
+            console.log(`[streamStart] Reset stale starting state for stream ${streamId} (age: ${age}ms)`);
+          }
+        } catch (e) {
+          console.warn(`[streamStart] Failed to reset stale state for ${streamId}:`, e);
+        }
+      }
+    }
     if (!stream.video_url || !stream.stream_key) return { kind: 'invalid-stream' };
 
     if (ACTIVE_STREAM_STATUSES.has(String(stream.status).toLowerCase())) {
       return { kind: 'already-running', status: stream.status };
     }
+
+    // The API's local stream catalog and the worker's Supabase ownership
+    // record must both exist before a job can be consumed by the worker.
+    await ensureStreamRecord(stream);
 
     const jobId = getStreamStartJobId(streamId);
     const existingJob = await findExistingJob(queue, streamId, jobId);

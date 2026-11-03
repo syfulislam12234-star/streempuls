@@ -12,7 +12,7 @@ services:
       redis-server 
       --appendonly yes 
       --maxmemory 1024mb 
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy noeviction
     volumes:
       - redis-data:/data
     networks:
@@ -50,6 +50,7 @@ services:
       - WS_PORT=4001
       - CORS_ORIGINS=${CORS_ORIGINS:-https://streempuls.mooo.com,https://www.streempuls.mooo.com}
       - DATA_DIR=/app/data
+      - UPLOADS_DIR=/app/uploads
       - QUEUE_NAME=streaming-queue
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -115,12 +116,14 @@ services:
       - MAX_RESTART_RETRIES=5
       - WORKER_CONCURRENCY=10
       - MEMORY_CEILING_MB=1850
+      - UPLOADS_DIR=/app/uploads
       - STORAGE_PROVIDER=${STORAGE_PROVIDER:-supabase}
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
       - SUPABASE_STORAGE_BUCKET=${SUPABASE_STORAGE_BUCKET:-stream-assets}
       - CLOUDFLARE_R2_ACCOUNT_ID=${CLOUDFLARE_R2_ACCOUNT_ID:-}
+      - CLEAN_QUEUE=${CLEAN_QUEUE:-false}
       - CLOUDFLARE_R2_ACCESS_KEY_ID=${CLOUDFLARE_R2_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}
       - CLOUDFLARE_R2_SECRET_ACCESS_KEY=${CLOUDFLARE_R2_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}
       - CLOUDFLARE_R2_ENDPOINT=${CLOUDFLARE_R2_ENDPOINT:-}

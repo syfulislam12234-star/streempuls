@@ -22,6 +22,7 @@ import { Worker } from 'bullmq';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { redisConfig, redisClient, QUEUE_NAME } from './queue.js';
 import { supabase, SUPABASE_STORAGE_BUCKET, STORAGE_PROVIDER, getPublicStorageUrl, getSignedStorageUrl } from './supabase.js';
@@ -31,6 +32,7 @@ import { buildStreamDestinations } from './streamDestinations.js';
 import { runWithStreamLease } from './streamLeaseRunner.js';
 import { extractFfmpegErrorLines, sanitizeChildProcessError, sanitizeFfmpegDiagnostic } from './streamDiagnostics.js';
 import { claimStreamOwnership, updateStreamWhenOwned } from './streamOwnership.js';
+import { resolveLocalUpload } from './localVideoSource.js';
 
 dotenv.config();
 
@@ -45,6 +47,7 @@ const DEFAULT_CONCURRENCY = Math.min(parseInt(process.env.WORKER_CONCURRENCY || 
 let currentConcurrency = DEFAULT_CONCURRENCY;
 
 const HEARTBEAT_FILE = path.resolve('/tmp/worker-heartbeat.json');
+const DEFAULT_UPLOADS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../uploads');
 const MEMORY_CEILING_MB = parseInt(process.env.MEMORY_CEILING_MB || '1850', 10); // Hard limit 2048MB, soft cycle at 1850MB
 const CONTAINER_HARD_MEMORY_LIMIT_MB = 2048;
 
@@ -194,7 +197,15 @@ async function launchFfmpegStream(job, lease, abortSignal) {
   let refreshSignedInputSource = null;
   const sensitiveValues = [streamKey, ...(Array.isArray(destinations) ? destinations.map((destination) => destination?.streamKey) : [])];
   if (videoUrl && !videoUrl.startsWith('http://') && !videoUrl.startsWith('https://')) {
-    const r2Provider = STORAGE_PROVIDER === 'r2' ? getStorageProvider('r2') : null;
+    // Resolve API-facing /uploads URLs against this worker's configured local
+    // directory; preserve other absolute paths for existing deployments.
+    if (videoUrl.startsWith('/')) {
+      inputSource = resolveLocalUpload(
+        videoUrl,
+        process.env.UPLOADS_DIR || DEFAULT_UPLOADS_DIR,
+      ) || videoUrl;
+    } else {
+      const r2Provider = STORAGE_PROVIDER === 'r2' ? getStorageProvider('r2') : null;
     const cleanPath = r2Provider
       ? normalizeR2ObjectKey(videoUrl, r2Provider.bucket)
       : videoUrl.replace(/^(stream-assets|live-stream-assets)\//, '').replace(/^\/+/, '');
@@ -208,6 +219,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       refreshSignedInputSource = () => provider.getSignedUrl(cleanPath, SIGNED_SOURCE_URL_TTL_MS / 1000);
       signedUrlGeneratedAt = Date.now();
       signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
+    }
     }
   } else if (typeof videoUrl === 'string' && /^https?:\/\//i.test(videoUrl)) {
     try {
@@ -344,11 +356,16 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           updated_at: new Date().toISOString(),
         }, true);
       } catch {}
+      try {
+        await releaseStreamLockAndReset(streamId, 'idle');
+      } catch {}
       reject(new Error(safeError));
     };
 
     lease?.onLost(handleLeaseLoss);
-    if (lease?.lost) void handleLeaseLoss(new Error('Distributed stream lock was lost.'));
+    if (lease?.lost) {
+      void handleLeaseLoss(new Error('Distributed stream lock was lost.'));
+    }
 
     activeStreams.set(streamId, streamController);
 
@@ -514,6 +531,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
 
       // Stream-specific stderr telemetry feed via Redis Pub/Sub
       let lastTelemetryUpdate = 0;
+    let lastCpuUsage = { user: 0, system: 0 };
       currentChild.stderr?.on('data', async (chunk) => {
         const raw = chunk.toString();
         for (const diagnostic of extractFfmpegErrorLines(raw, { secrets: sensitiveValues })) {
@@ -533,7 +551,16 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           const currentBitrate = bitrateMatch ? parseInt(bitrateMatch[1], 10) : 6000;
           const currentFps = fpsMatch ? parseFloat(fpsMatch[1]) : 60.0;
           const droppedFrames = dropMatch ? parseInt(dropMatch[1], 10) : 0;
-          const cpuUsagePct = 0.38;
+          // Genuine CPU measurement using process.cpuUsage() with elapsed wall-clock time.
+          // Tracks previous reading to calculate percentage over time.
+          const cpuUsageNow = process.cpuUsage ? process.cpuUsage() : { user: 0, system: 0 };
+          const cpuDelta = (typeof lastCpuUsage === 'object' && lastCpuUsage.user !== undefined)
+            ? cpuUsageNow.user + cpuUsageNow.system - lastCpuUsage.user - lastCpuUsage.system
+            : cpuUsageNow.user + cpuUsageNow.system;
+          const wallDelta = now - (lastTelemetryUpdate > 0 ? lastTelemetryUpdate : now);
+          const cpuUsagePct = wallDelta > 0 ? Math.min(100, (cpuDelta / wallDelta) * 100) : 0;
+          // Store for next measurement
+          lastCpuUsage = cpuUsageNow;
           const memMb = +(memUsage.rss / (1024 * 1024)).toFixed(1);
 
           const telemetryPayload = {
@@ -680,8 +707,38 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           }));
         } catch {}
 
-        if (streamController.isIntentionalStop || isTerminated || (code === 0 && !signal)) {
-          // Success: FFmpeg exited cleanly or was intentionally stopped
+        if (streamController.isIntentionalStop || isTerminated) {
+          // Stream was intentionally stopped or terminated - mark as idle, not live
+          try {
+            void updateOwnedStream({
+              status: 'idle',
+              ffmpeg_pid: null,
+              last_error: null,
+              updated_at: new Date().toISOString(),
+            }, true);
+          } catch {}
+          try {
+            void redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
+              streamId,
+              status: 'idle',
+              health_status: 'warning',
+              bitrate_kbps: 0,
+              fps: 0,
+              timestamp: new Date().toISOString(),
+            }));
+            void redisClient.publish('stream-telemetry-events', JSON.stringify({
+              streamId,
+              status: 'idle',
+              health_status: 'warning',
+              bitrate_kbps: 0,
+              fps: 0,
+              timestamp: new Date().toISOString(),
+            }));
+          } catch {}
+          console.log(`[FFmpeg Exit] Stream ${streamId} idle (intentionally stopped/terminated)`);
+          resolve();
+        } else if (code === 0 && !signal) {
+          // Success: FFmpeg exited cleanly with exit code 0 and no signal
           try {
             void updateOwnedStream({
               status: 'live',
@@ -857,7 +914,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
 
         try {
           const released = await updateOwnedStream({
-            status: 'ERROR',
+            status: 'failed',
             ffmpeg_pid: null,
             reconnect_attempts: reconnectAttempts,
             last_error: permanentFailureLog,
@@ -883,7 +940,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           try {
             await redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
               streamId,
-              status: 'ERROR',
+              status: 'failed',
               health_status: 'error',
               reconnectAttempts,
               maxRetries: MAX_RESTART_RETRIES,
@@ -892,7 +949,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
             }));
             await redisClient.publish('stream-telemetry-events', JSON.stringify({
               streamId,
-              status: 'ERROR',
+              status: 'failed',
               health_status: 'error',
               last_error: permanentFailureLog,
               timestamp: new Date().toISOString(),
@@ -1088,6 +1145,13 @@ async function shutdownWorker(signal) {
     stopStreamProcess(streamId, `Worker container recycle (${signal})`)
   );
 
+  // Also release Redis locks and reset Supabase status for all streams
+  await Promise.all(
+    Array.from(activeStreams.keys()).map((streamId) =>
+      releaseStreamLockAndReset(streamId, 'idle')
+    )
+  );
+
   await Promise.all(stopPromises);
 
   // All stream processors have now settled, so close can drain safely.
@@ -1102,6 +1166,46 @@ async function shutdownWorker(signal) {
 
   console.log('[Shutdown] All worker resources cleaned up. Exiting process.');
   process.exit(signal === 'MEMORY_CEILING_GUARD' ? 1 : 0);
+}
+
+// Helper: release Redis lease and reset Supabase stream status
+async function releaseStreamLockAndReset(streamId, status = 'idle', errorMsg = null) {
+  try {
+    // Release Redis lease if it exists
+    const leaseKey = `streempulse:active-stream:${streamId}`;
+    try {
+      await redisClient.del(leaseKey);
+    } catch {}
+    // Publish telemetry event for dashboard
+    try {
+      await redisClient.publish('stream-telemetry-events', JSON.stringify({
+        streamId,
+        status,
+        health_status: errorMsg ? 'error' : 'warning',
+        last_error: errorMsg || null,
+        timestamp: new Date().toISOString(),
+      }));
+    } catch {}
+  } catch {}
+}
+
+// Helper: reset all streams stuck in 'starting' or 'queued' at boot
+async function resetStuckStreams() {
+  try {
+    const streams = readStreams?.() || [];
+    for (const s of streams) {
+      if (s.status === 'starting' || s.status === 'queued') {
+        s.status = 'idle';
+        s.ffmpeg_pid = null;
+        s.last_error = null;
+        s.updated_at = new Date().toISOString();
+        await writeStreams(streams);
+        console.log(`[Boot] Reset stream ${s.id} from '${s.status}' to 'idle'`);
+      }
+    }
+  } catch (err) {
+    console.warn('[Boot] Failed to reset stuck streams:', err?.message || err);
+  }
 }
 
 process.on('SIGTERM', () => shutdownWorker('SIGTERM'));

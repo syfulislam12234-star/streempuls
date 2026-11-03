@@ -19,7 +19,8 @@ COPY backend/package*.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 # Copy worker application source files
-COPY backend/worker.js backend/queue.js backend/supabase.js backend/storage.js backend/healthcheck-worker.js backend/r2ObjectUrl.js backend/streamDestinations.js backend/redisLease.js backend/streamLeaseRunner.js backend/streamDiagnostics.js backend/streamOwnership.js ./
+COPY backend/worker.js backend/queue.js backend/supabase.js backend/storage.js backend/healthcheck-worker.js backend/r2ObjectUrl.js backend/streamDestinations.js backend/redisLease.js backend/streamLeaseRunner.js backend/streamDiagnostics.js backend/streamOwnership.js backend/localVideoSource.js ./
+COPY uploads/sample_lofi_broadcast_1080p60.mp4 ./uploads/sample_lofi_broadcast_1080p60.mp4
 
 # Set environment
 ENV NODE_ENV=production
@@ -27,6 +28,7 @@ ENV QUEUE_NAME=streaming-queue
 ENV MAX_CONCURRENT_STREAMS=10
 ENV MAX_RESTART_RETRIES=5
 ENV MEMORY_CEILING_MB=1850
+ENV UPLOADS_DIR=/app/uploads
 
 # Non-root user for security (ensure user has permissions to execute ffmpeg)
 USER node

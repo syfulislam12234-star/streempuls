@@ -21,6 +21,10 @@ test('every tracked Docker deployment image receives the helpers it imports', ()
   const rootWorker = readProjectFile('Dockerfile.worker');
   const backendApi = readProjectFile('backend/Dockerfile.api');
   const backendWorker = readProjectFile('backend/Dockerfile.worker');
+  const rootCompose = readProjectFile('docker-compose.yml');
+  const backendCompose = readProjectFile('backend/docker-compose.yml');
+  const rootDockerIgnore = readProjectFile('.dockerignore');
+  const backendDockerIgnore = readProjectFile('backend/.dockerignore');
 
   assert.match(rootApi, /COPY backend\/ \.\/backend\//, 'root API image copies the complete backend tree');
   assertCopied(rootWorker, [
@@ -30,8 +34,10 @@ test('every tracked Docker deployment image receives the helpers it imports', ()
     'backend/streamLeaseRunner.js',
     'backend/streamDiagnostics.js',
     'backend/streamOwnership.js',
+    'backend/localVideoSource.js',
   ]);
-  assertCopied(backendApi, ['streamDestinations.js', 'streamStart.js', 'redisLease.js']);
+  assert.match(rootWorker, /COPY uploads\/sample_lofi_broadcast_1080p60\.mp4 \.\/uploads\/sample_lofi_broadcast_1080p60\.mp4/);
+  assertCopied(backendApi, ['streamDestinations.js', 'streamAccess.js', 'streamPersistence.js', 'streamStart.js', 'redisLease.js']);
   assertCopied(backendWorker, [
     'r2ObjectUrl.js',
     'streamDestinations.js',
@@ -39,5 +45,13 @@ test('every tracked Docker deployment image receives the helpers it imports', ()
     'streamLeaseRunner.js',
     'streamDiagnostics.js',
     'streamOwnership.js',
+    'localVideoSource.js',
   ]);
+  assert.match(rootCompose, /UPLOADS_DIR=\/app\/uploads/);
+  assert.match(backendCompose, /UPLOADS_DIR=\/app\/uploads/);
+  assert.match(backendCompose, /\.\.\/uploads\/sample_lofi_broadcast_1080p60\.mp4:\/app\/uploads\/sample_lofi_broadcast_1080p60\.mp4:ro/);
+  assert.match(rootDockerIgnore, /^\*\*\/\.env$/m);
+  assert.match(rootDockerIgnore, /^\*\*\/\.env\.\*$/m);
+  assert.match(backendDockerIgnore, /^\*\*\/\.env$/m);
+  assert.match(backendDockerIgnore, /^\*\*\/\.env\.\*$/m);
 });

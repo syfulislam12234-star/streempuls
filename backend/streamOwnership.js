@@ -57,7 +57,7 @@ export async function claimStreamOwnership(database, {
   const currentToken = typeof current.worker_node_id === 'string' && current.worker_node_id
     ? current.worker_node_id
     : null;
-  if (currentToken && currentToken !== token && hasFreshHeartbeat(current.last_heartbeat, { now, staleAfterMs })) {
+  if (currentToken && currentToken !== token && hasFreshHeartbeat(current.last_heartbeat, { now, staleAfterMs }) && current.status !== 'idle') {
     return false;
   }
 

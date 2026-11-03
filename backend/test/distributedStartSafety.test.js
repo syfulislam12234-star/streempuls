@@ -97,6 +97,60 @@ test('two concurrent Start API operations enqueue one deterministic BullMQ job',
   assert.equal(queue.jobs.has(getStreamStartJobId(stream.id)), true);
 });
 
+test('worker-visible stream record is ensured before its BullMQ start job is added', async () => {
+  const redis = new FakeRedis();
+  const queue = new FakeQueue();
+  const stream = { id: 'stream-persist-first', status: 'idle', video_url: '/uploads/clip.mp4', stream_key: 'key-value' };
+  const steps = [];
+  const options = startRequestOptions({
+    redis,
+    queue,
+    stream,
+    markStarting: async () => { steps.push('mark-starting'); },
+  });
+  options.ensureStreamRecord = async (record) => {
+    assert.equal(record, stream);
+    steps.push('ensure-record');
+  };
+  const addJob = queue.add.bind(queue);
+  queue.add = async (...args) => {
+    steps.push('enqueue');
+    return addJob(...args);
+  };
+
+  const result = await enqueueStreamStart(options);
+
+  assert.equal(result.kind, 'started');
+  assert.deepEqual(steps, ['ensure-record', 'enqueue', 'mark-starting']);
+});
+
+test('a stream persistence failure prevents enqueueing a worker job', async () => {
+  const redis = new FakeRedis();
+  const queue = new FakeQueue();
+  const stream = { id: 'stream-persist-failed', status: 'idle', video_url: '/uploads/clip.mp4', stream_key: 'key-value' };
+  const options = startRequestOptions({ redis, queue, stream });
+  options.ensureStreamRecord = async () => { throw new Error('persistence unavailable'); };
+
+  await assert.rejects(enqueueStreamStart(options), /persistence unavailable/);
+  assert.equal(queue.addCount, 0);
+});
+
+test('a stream access denial prevents persistence and enqueueing', async () => {
+  const redis = new FakeRedis();
+  const queue = new FakeQueue();
+  const stream = { id: 'foreign-stream', status: 'idle', video_url: '/uploads/clip.mp4', stream_key: 'key-value' };
+  const options = startRequestOptions({ redis, queue, stream });
+  let persistenceCalls = 0;
+  options.authorizeStream = async () => false;
+  options.ensureStreamRecord = async () => { persistenceCalls++; };
+
+  const result = await enqueueStreamStart(options);
+
+  assert.deepEqual(result, { kind: 'not-found' });
+  assert.equal(persistenceCalls, 0);
+  assert.equal(queue.addCount, 0);
+});
+
 test('repeated Start while stream status is starting is rejected without enqueueing', async () => {
   const redis = new FakeRedis();
   const queue = new FakeQueue();
