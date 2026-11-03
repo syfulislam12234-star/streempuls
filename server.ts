@@ -23,6 +23,7 @@ import { fileURLToPath } from 'url';
 import { extractFfmpegErrorLines, sanitizeChildProcessError, sanitizeFfmpegDiagnostic } from './backend/streamDiagnostics.js';
 import { buildStreamDestinations, validateStreamConfiguration } from './backend/streamDestinations.js';
 import { claimStreamOwnership, isStaleHeartbeat, reconcileStaleStreamRecords, updateStreamWhenOwned } from './backend/streamOwnership.js';
+import { countActiveStreams, reconcileLocalStreamState } from './backend/streamQuota.js';
 import {
   clusterRegistry,
   TIER_RESOURCE_PROFILES,
@@ -3400,10 +3401,15 @@ app.post('/api/streams', async (req, res) => {
 
     const existingStreams = readLocalStreams();
     const channelLimit = currentUser?.channel_limit ?? 1;
-    if (existingStreams.length >= channelLimit) {
+    const ownerId = currentUser?.id || userId;
+    if (ownerId && reconcileLocalStreamState(existingStreams, { userId: ownerId }) > 0) {
+      writeLocalStreams(existingStreams);
+    }
+    const activeStreamCount = ownerId ? countActiveStreams(existingStreams, ownerId) : 0;
+    if (activeStreamCount >= channelLimit) {
       return res.status(403).json({
         success: false,
-        error: `Your ${currentUser?.subscription_tier?.toUpperCase() || 'current'} plan limit reached (${channelLimit} channel allowed). Please upgrade your subscription plan to add more live channels.`,
+        error: `Your ${currentUser?.subscription_tier?.toUpperCase() || 'current'} plan limit reached (${activeStreamCount} active stream(s), ${channelLimit} channel allowed).`,
       });
     }
 
@@ -3626,6 +3632,15 @@ app.post('/api/streams/:id/start', async (req, res) => {
     const currentUser = (userId ? users.find((u) => u.id === userId) : null) ||
       users.find((u) => u.subscription_status === 'active') || users[0];
     const userTier: SubscriptionTier = (currentUser?.subscription_tier as SubscriptionTier) || 'free';
+
+    if (!supabase && currentUser?.id) {
+      const localStreams = readLocalStreams();
+      if (reconcileLocalStreamState(localStreams, { userId: currentUser.id }) > 0) {
+        writeLocalStreams(localStreams);
+        stream = localStreams.find((candidate) => candidate.id === id) || stream;
+      }
+    }
+
     try {
       validateStreamConfiguration({
         rtmpServerUrl: stream.rtmp_server_url || 'rtmp://a.rtmp.youtube.com/live2',
