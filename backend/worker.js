@@ -216,7 +216,8 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       signedUrlGeneratedAt = Date.now();
       signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
     }
-  else if (typeof videoUrl === 'string' && /^https?:\/\//i.test(videoUrl)) {
+    }
+  } else if (typeof videoUrl === 'string' && /^https?:\/\//i.test(videoUrl)) {
     try {
       const parsedUrl = new URL(videoUrl);
       const r2Provider = getStorageProvider('r2');

@@ -1,4 +1,4 @@
-import { validateStreamKey } from './backend/streamDestinations.js';
+import { validateStreamKey } from '../streamDestinations.js';
 
 const realYoutubeKeys = [
   'wvsa-xqza-4k8a-ufyu',
