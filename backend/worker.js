@@ -194,7 +194,14 @@ async function launchFfmpegStream(job, lease, abortSignal) {
   let refreshSignedInputSource = null;
   const sensitiveValues = [streamKey, ...(Array.isArray(destinations) ? destinations.map((destination) => destination?.streamKey) : [])];
   if (videoUrl && !videoUrl.startsWith('http://') && !videoUrl.startsWith('https://')) {
-    const r2Provider = STORAGE_PROVIDER === 'r2' ? getStorageProvider('r2') : null;
+    // Local file path - use directly if it starts with /
+    // Inside Docker container, uploaded files are accessible via absolute paths
+    // The video_url in streams.json uses /uploads/... format
+    if (videoUrl.startsWith('/')) {
+      // Use local file path directly; FFmpeg can read absolute paths inside the container
+      inputSource = videoUrl;
+    } else {
+      const r2Provider = STORAGE_PROVIDER === 'r2' ? getStorageProvider('r2') : null;
     const cleanPath = r2Provider
       ? normalizeR2ObjectKey(videoUrl, r2Provider.bucket)
       : videoUrl.replace(/^(stream-assets|live-stream-assets)\//, '').replace(/^\/+/, '');
