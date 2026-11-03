@@ -526,6 +526,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
 
       // Stream-specific stderr telemetry feed via Redis Pub/Sub
       let lastTelemetryUpdate = 0;
+    let lastCpuUsage = { user: 0, system: 0 };
       currentChild.stderr?.on('data', async (chunk) => {
         const raw = chunk.toString();
         for (const diagnostic of extractFfmpegErrorLines(raw, { secrets: sensitiveValues })) {
@@ -545,7 +546,16 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           const currentBitrate = bitrateMatch ? parseInt(bitrateMatch[1], 10) : 6000;
           const currentFps = fpsMatch ? parseFloat(fpsMatch[1]) : 60.0;
           const droppedFrames = dropMatch ? parseInt(dropMatch[1], 10) : 0;
-          const cpuUsagePct = 0.38;
+          // Genuine CPU measurement using process.cpuUsage() with elapsed wall-clock time.
+          // Tracks previous reading to calculate percentage over time.
+          const cpuUsageNow = process.cpuUsage ? process.cpuUsage() : { user: 0, system: 0 };
+          const cpuDelta = (typeof lastCpuUsage === 'object' && lastCpuUsage.user !== undefined)
+            ? cpuUsageNow.user + cpuUsageNow.system - lastCpuUsage.user - lastCpuUsage.system
+            : cpuUsageNow.user + cpuUsageNow.system;
+          const wallDelta = now - (lastTelemetryUpdate > 0 ? lastTelemetryUpdate : now);
+          const cpuUsagePct = wallDelta > 0 ? Math.min(100, (cpuDelta / wallDelta) * 100) : 0;
+          // Store for next measurement
+          lastCpuUsage = cpuUsageNow;
           const memMb = +(memUsage.rss / (1024 * 1024)).toFixed(1);
 
           const telemetryPayload = {

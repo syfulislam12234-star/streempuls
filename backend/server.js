@@ -1096,13 +1096,16 @@ async function attachStreamStatusBridge() {
           ...current,
           status: nextStatus,
           updated_at: new Date().toISOString(),
+          current_bitrate_kbps: Number.isFinite(payload.bitrate_kbps) ? payload.bitrate_kbps : current.current_bitrate_kbps,
+          fps: Number.isFinite(payload.fps) ? payload.fps : current.fps,
+          dropped_frames: Number.isInteger(payload.dropped_frames) ? payload.dropped_frames : (current.dropped_frames || 0),
+          cpu_usage_pct: Number.isFinite(payload.cpu_usage_pct) ? payload.cpu_usage_pct : current.cpu_usage_pct,
+          mem_usage_mb: Number.isFinite(payload.mem_usage_mb) ? payload.mem_usage_mb : current.mem_usage_mb,
+          // Derive health status from actual metrics
+          health_status: payload.dropped_frames > 5 ? 'warning' : current.health_status !== undefined && current.health_status !== '' ? current.health_status : 'excellent',
         };
 
         if (nextStatus === 'live') {
-          next.current_bitrate_kbps = Number.isFinite(payload.bitrate_kbps) ? payload.bitrate_kbps : current.current_bitrate_kbps;
-          next.fps = Number.isFinite(payload.fps) ? payload.fps : current.fps;
-          next.cpu_usage_pct = Number.isFinite(payload.cpu_usage_pct) ? payload.cpu_usage_pct : current.cpu_usage_pct;
-          next.mem_usage_mb = Number.isFinite(payload.mem_usage_mb) ? payload.mem_usage_mb : current.mem_usage_mb;
           next.ffmpeg_pid = current.ffmpeg_pid || null;
         } else if (nextStatus === 'starting') {
           // Transitional state: preserve existing metrics and pid.
