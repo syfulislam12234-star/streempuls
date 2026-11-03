@@ -46,8 +46,8 @@ function normalizedDestinations(stream) {
   });
 }
 
-function sameStream(existing, stream) {
-  return existing.user_id === stream.user_id
+function sameStream(existing, stream, profileId) {
+  return existing.user_id === profileId
     && existing.video_url === stream.video_url
     && existing.stream_key === stream.stream_key
     && existing.rtmp_server_url === stream.rtmp_server_url;
@@ -89,16 +89,116 @@ async function persistDestinations(database, destinations, streamId) {
   }
 }
 
+function profileDefaults(owner) {
+  return {
+    id: owner.id,
+    email: owner.email.trim().toLowerCase(),
+    full_name: typeof owner.full_name === 'string' ? owner.full_name : null,
+    role: 'user',
+    subscription_tier: 'free',
+    subscription_status: 'unpaid',
+    channel_limit: 1,
+    video_limit: 1,
+    duration_days: 3,
+    hour_limit: 10,
+    has_watermark: true,
+    is_brand_free: false,
+    price_bdt: 0,
+  };
+}
+
+function isUnknownProfileColumn(error) {
+  return error?.code === 'PGRST204' || error?.code === '42703';
+}
+
+async function findProfile(database, owner) {
+  const { data: byId, error: idError } = await database
+    .from('profiles').select('id,email').eq('id', owner.id).maybeSingle();
+  // A local account ID may be non-UUID in the TEXT-ID deployment, while the
+  // alternate schema casts profile IDs to UUID. In that case, still try the
+  // exact verified email mapping instead of failing before resolving identity.
+  if (idError && idError.code !== '22P02') {
+    throw new StreamPersistenceError('PROFILE_LOOKUP_FAILED', 'Could not verify the user profile in Supabase.');
+  }
+  if (byId) {
+    if (byId.email && byId.email.trim().toLowerCase() !== owner.email.trim().toLowerCase()) {
+      throw new StreamPersistenceError('PROFILE_ID_CONFLICT', 'The local user ID belongs to a different Supabase profile.');
+    }
+    return byId;
+  }
+
+  const { data: byEmail, error: emailError } = await database
+    .from('profiles').select('id,email').eq('email', owner.email.trim().toLowerCase()).maybeSingle();
+  if (emailError) {
+    throw new StreamPersistenceError('PROFILE_LOOKUP_FAILED', 'Could not verify the user profile in Supabase.');
+  }
+  return byEmail || null;
+}
+
+async function insertProfile(database, profile) {
+  return database.from('profiles').insert(profile).select('id,email').maybeSingle();
+}
+
+/**
+ * Provision only the application profile from a verified local session.
+ * For the UUID/auth.users schema, require a matching existing Supabase Auth
+ * identity; never invent or create a second authentication identity here.
+ */
+export async function ensureProfileRecord(database, owner) {
+  if (typeof owner?.id !== 'string' || !owner.id
+    || typeof owner.email !== 'string' || !owner.email.trim()) {
+    throw new StreamPersistenceError('PROFILE_IDENTITY_REQUIRED', 'A verified local account ID and email are required to provision a Supabase profile.');
+  }
+
+  const existing = await findProfile(database, owner);
+  if (existing) return existing;
+
+  let result = await insertProfile(database, profileDefaults(owner));
+  if (result.error && isUnknownProfileColumn(result.error)) {
+    if (typeof database.auth?.admin?.getUserById !== 'function') {
+      throw new StreamPersistenceError('PROFILE_SCHEMA_UNSUPPORTED', 'The deployed profile schema requires a matching Supabase Auth user.');
+    }
+    const { data: authData, error: authError } = await database.auth.admin.getUserById(owner.id);
+    const authUser = authData?.user;
+    if (authError || !authUser
+      || authUser.email?.trim().toLowerCase() !== owner.email.trim().toLowerCase()) {
+      throw new StreamPersistenceError('SUPABASE_AUTH_USER_REQUIRED', 'A matching Supabase Auth user is required by the deployed profile schema.');
+    }
+    result = await insertProfile(database, {
+      id: authUser.id,
+      email: authUser.email,
+      full_name: typeof owner.full_name === 'string' ? owner.full_name : null,
+      role: 'user',
+    });
+  }
+
+  if (result.error) {
+    const concurrent = await findProfile(database, owner).catch(() => null);
+    if (concurrent) return concurrent;
+    if (result.error.code === '23503') {
+      throw new StreamPersistenceError('PROFILE_NOT_FOUND', 'The matching Supabase Auth user/profile is missing or violates a foreign key.');
+    }
+    throw new StreamPersistenceError('PROFILE_PROVISION_FAILED', 'Could not create the default Supabase profile.');
+  }
+
+  if (result.data) return result.data;
+  const confirmed = await findProfile(database, owner);
+  if (!confirmed) {
+    throw new StreamPersistenceError('PROFILE_PROVISION_UNCONFIRMED', 'The Supabase profile insert could not be confirmed.');
+  }
+  return confirmed;
+}
+
 /** Insert a missing parent and relational destinations; never update an existing parent. */
-export async function ensureStreamRecord(database, stream) {
+export async function ensureStreamRecord(database, stream, owner) {
   if (!database?.from || typeof stream?.id !== 'string' || !stream.id) {
     throw new TypeError('A database client and stream ID are required.');
   }
-  if (typeof stream.user_id !== 'string' || !stream.user_id) {
-    throw new StreamPersistenceError('STREAM_OWNER_REQUIRED', 'This legacy stream has no verified owner and cannot be queued.');
-  }
 
   const destinations = normalizedDestinations(stream);
+  const profile = await ensureProfileRecord(database, owner);
+  const profileId = profile.id;
+  const databaseStream = { ...stream, user_id: profileId };
   const { data: existing, error: lookupError } = await database
     .from('streams')
     .select('id,user_id,video_url,stream_key,rtmp_server_url')
@@ -108,28 +208,19 @@ export async function ensureStreamRecord(database, stream) {
     throw new StreamPersistenceError('STREAM_LOOKUP_FAILED', 'Could not verify the stream record in Supabase.');
   }
   if (existing) {
-    if (!sameStream(existing, stream)) {
+    if (!sameStream(existing, databaseStream, profileId)) {
       throw new StreamPersistenceError('STREAM_CONFIGURATION_MISMATCH', 'The existing Supabase stream differs in owner or source; no data was overwritten.');
     }
     await persistDestinations(database, destinations, stream.id);
     return false;
   }
 
-  const { data: profile, error: profileError } = await database
-    .from('profiles').select('id').eq('id', stream.user_id).maybeSingle();
-  if (profileError) {
-    throw new StreamPersistenceError('PROFILE_LOOKUP_FAILED', 'Could not verify the stream owner profile in Supabase.');
-  }
-  if (!profile) {
-    throw new StreamPersistenceError('PROFILE_NOT_FOUND', 'The stream owner profile is missing from Supabase; the stream was not queued.');
-  }
-
-  const { error: insertError } = await database.from('streams').insert(buildStreamInsertPayload(stream));
+  const { error: insertError } = await database.from('streams').insert(buildStreamInsertPayload(databaseStream, profileId));
   let inserted = !insertError;
   if (insertError) {
     const { data: concurrent, error: confirmError } = await database
       .from('streams').select('id,user_id,video_url,stream_key,rtmp_server_url').eq('id', stream.id).maybeSingle();
-    if (confirmError || !concurrent || !sameStream(concurrent, stream)) {
+    if (confirmError || !concurrent || !sameStream(concurrent, databaseStream, profileId)) {
       if (insertError.code === '23503') {
         throw new StreamPersistenceError('PROFILE_NOT_FOUND', 'The stream owner profile is missing from Supabase; the stream was not queued.');
       }

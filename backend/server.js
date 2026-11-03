@@ -868,7 +868,7 @@ app.post('/api/streams/:id/start', async (req, res, next) => {
       queue: streamQueue,
       streamId: req.params.id,
       getStream: () => readStreams().find((stream) => stream.id === req.params.id),
-      getSubscriptionTier: (stream) => getStreamUser(stream.user_id)?.subscription_tier || req.streamUser.subscription_tier || 'free',
+      getSubscriptionTier: (stream) => readUsers().find((user) => user.id === stream.user_id)?.subscription_tier || 'free',
       authorizeStream: (stream) => getAuthorizedStream(req.streamUser, [stream], stream.id) !== null,
       ensureStreamRecord: async (stream) => {
         if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
@@ -877,11 +877,22 @@ app.post('/api/streams/:id/start', async (req, res, next) => {
           throw error;
         }
         try {
-          await ensureStreamRecord(supabase, stream);
+          const streamOwner = readUsers().find((user) => user.id === stream.user_id);
+          if (!streamOwner) {
+            const error = new Error('The local owner of this stream could not be verified.');
+            error.status = 409;
+            error.code = 'STREAM_OWNER_NOT_FOUND';
+            throw error;
+          }
+          await ensureStreamRecord(supabase, stream, streamOwner);
         } catch (cause) {
+          if (cause?.code === 'STREAM_OWNER_NOT_FOUND') throw cause;
           const code = cause instanceof StreamPersistenceError ? cause.code : 'STREAM_PERSISTENCE_FAILED';
           const error = new Error('Unable to ensure the worker stream record in Supabase.');
-          error.status = code === 'PROFILE_NOT_FOUND' || code === 'STREAM_OWNER_REQUIRED' ? 409 : 503;
+          error.status = code === 'PROFILE_NOT_FOUND' || code === 'STREAM_OWNER_REQUIRED'
+            || code === 'PROFILE_IDENTITY_REQUIRED' || code === 'SUPABASE_AUTH_USER_REQUIRED'
+            ? 409
+            : 503;
           error.code = code;
           throw error;
         }
