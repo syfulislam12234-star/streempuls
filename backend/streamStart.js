@@ -1,4 +1,6 @@
 import { withRedisLease } from './redisLease.js';
+import { reconcileUserStreamsForStart } from './streamOwnership.js';
+import { countActiveStreams } from './streamQuota.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,6 +55,9 @@ export async function enqueueStreamStart({
   markStarting,
   authorizeStream = async () => true,
   ensureStreamRecord = async () => {},
+  database,
+  userId,
+  planMaxStreams,
 }) {
   const lockKey = `streempulse:start-request:${streamId}`;
   const result = await withRedisLease(redis, lockKey, async () => {
@@ -93,6 +98,46 @@ if (stream && stream.status === 'starting') {
 
     if (ACTIVE_STREAM_STATUSES.has(String(stream.status).toLowerCase())) {
       return { kind: 'already-running', status: stream.status };
+    }
+
+    // --- Cleanup: clear stale/stopped records for this user in Supabase ---
+    // Prevents split ownership and distributed stream lock loss when a user
+    // has leftover records from crashed or previously stopped broadcasts.
+    if (database && typeof userId === 'string' && userId) {
+      const now = Date.now();
+      await reconcileUserStreamsForStart(database, {
+        userId,
+        exceptStreamId: streamId,
+        now,
+      });
+    }
+
+    // --- Plan limit: count the user's fresh active streams (excluding this one) ---
+    const planLimit = typeof planMaxStreams === 'number' && Number.isFinite(planMaxStreams)
+      ? planMaxStreams
+      : Infinity;
+    if (database && typeof userId === 'string' && userId && planLimit !== Infinity) {
+      const { data: activeRows, error: activeError } = await database
+        .from('streams')
+        .select('id,last_heartbeat')
+        .eq('user_id', userId)
+        .neq('id', streamId)
+        .in('status', ['queued', 'starting', 'live', 'reconnecting']);
+      if (activeError) throw activeError;
+
+      const now = Date.now();
+      const activeCount = (Array.isArray(activeRows) ? activeRows : []).filter((row) => {
+        const ts = typeof row.last_heartbeat === 'string' ? Date.parse(row.last_heartbeat) : null;
+        return ts !== null && ts >= now - 30_000;
+      }).length;
+
+      if (activeCount >= planLimit) {
+        return {
+          kind: 'plan-limit-exceeded',
+          activeCount,
+          planMaxStreams: planLimit,
+        };
+      }
     }
 
     // The API's local stream catalog and the worker's Supabase ownership

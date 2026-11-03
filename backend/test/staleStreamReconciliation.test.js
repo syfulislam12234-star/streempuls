@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { reconcileStaleStreamRecords } from '../streamOwnership.js';
+import { reconcileStaleStreamRecords, reconcileUserStreamsForStart } from '../streamOwnership.js';
 
 class Query {
   constructor(db, action, payload) {
@@ -38,6 +38,7 @@ class FakeDatabase {
     return {
       select: () => new Query(this, 'select'),
       update: (payload) => new Query(this, 'update', payload),
+      delete: () => new Query(this, 'delete'),
     };
   }
 }
@@ -66,4 +67,36 @@ test('missing heartbeat is reclaimed and the selected stream can be excluded', a
   assert.equal(await reconcileStaleStreamRecords(database, { userId: 'owner', exceptStreamId: 'selected' }), 1);
   assert.equal(database.rows.find((row) => row.id === 'selected').status, 'starting');
   assert.equal(database.rows.find((row) => row.id === 'orphan').status, 'idle');
+});
+
+test('reconcileUserStreamsForStart deletes terminal records and reclaims stale active records', async () => {
+  const now = Date.now();
+  const database = new FakeDatabase([
+    { id: 'failed-1', user_id: 'owner', status: 'failed', worker_node_id: 'old', last_heartbeat: new Date(now - 60_000).toISOString() },
+    { id: 'stopped-1', user_id: 'owner', status: 'stopped', worker_node_id: 'old2', last_heartbeat: new Date(now - 60_000).toISOString() },
+    { id: 'stale-live', user_id: 'owner', status: 'live', worker_node_id: 'old3', last_heartbeat: new Date(now - 60_000).toISOString() },
+    { id: 'fresh-live', user_id: 'owner', status: 'live', worker_node_id: 'fresh', last_heartbeat: new Date(now - 1_000).toISOString() },
+    { id: 'other-user-failed', user_id: 'other', status: 'failed', worker_node_id: 'other-old', last_heartbeat: new Date(now - 60_000).toISOString() },
+    { id: 'target', user_id: 'owner', status: 'idle', last_heartbeat: null },
+  ]);
+
+  const result = await reconcileUserStreamsForStart(database, {
+    userId: 'owner',
+    exceptStreamId: 'target',
+    now,
+  });
+
+  assert.equal(result.deleted, 2); // failed-1 and stopped-1
+  assert.equal(result.reclaimed, 1); // stale-live only (fresh-live preserved, other-user-failed is other user)
+
+  assert.equal(database.rows.find((r) => r.id === 'stale-live').status, 'idle');
+  assert.equal(database.rows.find((r) => r.id === 'stale-live').worker_node_id, null);
+  assert.equal(database.rows.find((r) => r.id === 'fresh-live').status, 'live');
+  assert.equal(database.rows.find((r) => r.id === 'fresh-live').worker_node_id, 'fresh');
+  assert.equal(database.rows.find((r) => r.id === 'other-user-failed').status, 'failed');
+});
+
+test('reconcileUserStreamsForStart returns zeros for invalid input', async () => {
+  assert.deepEqual(await reconcileUserStreamsForStart(null, { userId: 'owner' }), { deleted: 0, reclaimed: 0 });
+  assert.deepEqual(await reconcileUserStreamsForStart({}, { userId: '' }), { deleted: 0, reclaimed: 0 });
 });

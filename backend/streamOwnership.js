@@ -149,7 +149,9 @@ export async function updateStreamWhenOwned(database, {
     throw new TypeError('A database client, stream ID, and ownership token are required.');
   }
 
-  const payload = release ? { ...updates, worker_node_id: null } : updates;
+  const payload = release
+    ? { ...updates, worker_node_id: null, last_heartbeat: null }
+    : updates;
   const { data, error } = await database
     .from('streams')
     .update(payload)
@@ -159,6 +161,62 @@ export async function updateStreamWhenOwned(database, {
     .maybeSingle();
   if (error) throw error;
   return Boolean(data);
+}
+
+/**
+ * Reconcile a user's stream records before a new start.
+ *
+ * - Deletes terminal records (status 'failed' / 'stopped') owned by the user,
+ *   except the stream being started, so stale stopped records cannot cause
+ *   split ownership or distributed stream lock conflicts.
+ * - Reclaims stale active records (expired heartbeat) owned by the user,
+ *   except the stream being started, setting them back to 'idle'.
+ *
+ * @param {any} database
+ * @param {{ userId: string, exceptStreamId?: string | null, now?: number, staleAfterMs?: number }} options
+ * @returns {{ deleted: number, reclaimed: number }}
+ */
+export async function reconcileUserStreamsForStart(database, {
+  userId,
+  exceptStreamId = null,
+  now = Date.now(),
+  staleAfterMs = DEFAULT_STALE_AFTER_MS,
+} = {}) {
+  if (!database?.from || typeof userId !== 'string' || !userId) {
+    return { deleted: 0, reclaimed: 0 };
+  }
+
+  let deleted = 0;
+
+  // Delete terminal (stopped/failed) records for this user except the stream being started.
+  const { data: terminalRows, error: terminalError } = await database
+    .from('streams')
+    .select('id')
+    .eq('user_id', userId)
+    .in('status', ['failed', 'stopped']);
+  if (terminalError) throw terminalError;
+
+  for (const row of Array.isArray(terminalRows) ? terminalRows : []) {
+    if (row.id === exceptStreamId) continue;
+    const { error } = await database
+      .from('streams')
+      .delete()
+      .eq('id', row.id)
+      .eq('user_id', userId)
+      .in('status', ['failed', 'stopped']);
+    if (error) throw error;
+    deleted++;
+  }
+
+  // Reclaim stale active records (expired heartbeat) for this user except the stream being started.
+  const reclaimed = await reconcileStaleStreamRecords(database, {
+    userId,
+    exceptStreamId,
+    now,
+    staleAfterMs,
+  });
+
+  return { deleted, reclaimed };
 }
 
 export { DEFAULT_STALE_AFTER_MS };

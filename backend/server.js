@@ -863,10 +863,16 @@ app.post('/api/streams/test-connection', (req, res) => {
 app.post('/api/streams/:id/start', async (req, res, next) => {
   try {
     const { redisClient, streamQueue } = await import('./queue.js');
+    const user = req.streamUser;
+    const userId = user.id;
+    const { channelLimit } = getStreamLimits(user);
     const result = await enqueueStreamStart({
       redis: redisClient,
       queue: streamQueue,
       streamId: req.params.id,
+      database: supabase,
+      userId,
+      planMaxStreams: channelLimit,
       getStream: () => readStreams().find((stream) => stream.id === req.params.id),
       getSubscriptionTier: (stream) => readUsers().find((user) => user.id === stream.user_id)?.subscription_tier || 'free',
       authorizeStream: (stream) => getAuthorizedStream(req.streamUser, [stream], stream.id) !== null,
@@ -920,6 +926,12 @@ app.post('/api/streams/:id/start', async (req, res, next) => {
     }
     if (result.kind === 'request-in-progress') {
       return res.status(409).json({ success: false, error: 'A start request for this stream is already being processed.' });
+    }
+    if (result.kind === 'plan-limit-exceeded') {
+      return res.status(403).json({
+        success: false,
+        error: `Your plan allows up to ${result.planMaxStreams} active stream(s). You already have ${result.activeCount} active stream(s).`,
+      });
     }
 
     return res.status(202).json({

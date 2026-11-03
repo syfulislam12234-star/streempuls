@@ -368,6 +368,9 @@ async function launchFfmpegStream(job, lease, abortSignal) {
     }
 
     activeStreams.set(streamId, streamController);
+    // Record the Redis lease token so shutdown/cleanup can release the lock
+    // only if this process still owns it (fenced delete, no lock theft).
+    streamController.leaseToken = lease?.token || null;
 
     // Spawns FFmpeg with Zero-Lag and Low-Latency configuration
     async function startFfmpegProcess() {
@@ -1169,12 +1172,35 @@ async function shutdownWorker(signal) {
 }
 
 // Helper: release Redis lease and reset Supabase stream status
+//
+// The Redis lease delete is fenced: we only remove the key if this process
+// still holds the ownership token. An unfenced DEL would allow a stopping
+// worker to steal/delete another worker's active stream lock, causing the
+// "stream is owned by another runtime" / distributed lock loss errors.
 async function releaseStreamLockAndReset(streamId, status = 'idle', errorMsg = null) {
   try {
-    // Release Redis lease if it exists
+    // Release Redis lease if it exists (fenced by ownership token)
     const leaseKey = `streempulse:active-stream:${streamId}`;
+    const streamInstance = activeStreams.get(streamId);
+    const token = streamInstance?.leaseToken || null;
     try {
-      await redisClient.del(leaseKey);
+      if (token) {
+        const current = await redisClient.get(leaseKey);
+        if (current === token) {
+          await redisClient.del(leaseKey);
+        }
+      } else {
+        // No token tracked (e.g. called before lease acquisition): fall back
+        // to unfenced delete only when this process is exiting.
+        await redisClient.del(leaseKey);
+      }
+    } catch {}
+    // Clear Supabase heartbeat and ownership for the stream
+    try {
+      await supabase
+        .from('streams')
+        .update({ status, ffmpeg_pid: null, worker_node_id: null, last_heartbeat: null, updated_at: new Date().toISOString() })
+        .eq('id', streamId);
     } catch {}
     // Publish telemetry event for dashboard
     try {
