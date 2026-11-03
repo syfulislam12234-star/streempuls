@@ -32,6 +32,19 @@ const sampleStream = (overrides = {}) => ({
   ...overrides,
 });
 
+async function assertRejectsWithCode(operation, expectedCode) {
+  let caught;
+  try {
+    await operation;
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.ok(caught instanceof Error, `expected rejection with code ${expectedCode}, but the operation resolved`);
+  assert.equal(caught.code, expectedCode, `unexpected rejection: ${caught.message}`);
+  return caught;
+}
+
 class FakeQuery {
   constructor(db, table, action, payload) {
     this.db = db;
@@ -133,11 +146,8 @@ test('rejects incomplete enabled destinations before any stream insert', async (
     destinations: [{ platform: 'custom', label: '', rtmpServerUrl: '', streamKey: '', isEnabled: true }],
   });
 
-  await assert.rejects(ensureStreamRecord(database, stream), (error) => {
-    assert.equal(error.code, 'INVALID_DESTINATION');
-    assert.equal(database.streams.length, 0);
-    return true;
-  });
+  await assertRejectsWithCode(ensureStreamRecord(database, stream), 'INVALID_DESTINATION');
+  assert.equal(database.streams.length, 0);
 });
 
 test('does not overwrite an existing stream row or its owner/ownership fields', async () => {
@@ -189,10 +199,7 @@ test('rejects a conflicting existing destination rather than mutating it', async
   };
   database.stream_destinations.push(priorDestination);
 
-  await assert.rejects(ensureStreamRecord(database, stream), (error) => {
-    assert.equal(error.code, 'DESTINATION_CONFIGURATION_MISMATCH');
-    return true;
-  });
+  await assertRejectsWithCode(ensureStreamRecord(database, stream), 'DESTINATION_CONFIGURATION_MISMATCH');
   assert.deepEqual(database.stream_destinations, [priorDestination]);
 });
 
@@ -201,10 +208,7 @@ test('rejects a conflicting existing stream rather than overwriting it', async (
   const stream = sampleStream({ destinations: [] });
   database.streams.push({ ...buildStreamInsertPayload(stream), stream_key: 'different-key' });
 
-  await assert.rejects(ensureStreamRecord(database, stream), (error) => {
-    assert.equal(error.code, 'STREAM_CONFIGURATION_MISMATCH');
-    return true;
-  });
+  await assertRejectsWithCode(ensureStreamRecord(database, stream), 'STREAM_CONFIGURATION_MISMATCH');
 });
 
 test('confirms a concurrent parent insert and then verifies relational destinations', async () => {
@@ -229,39 +233,27 @@ test('fails explicitly when the owner profile is absent (including FK ownership 
   const database = new FakeDatabase();
   database.profiles = [];
 
-  await assert.rejects(ensureStreamRecord(database, sampleStream()), (error) => {
-    assert.ok(error instanceof StreamPersistenceError);
-    assert.equal(error.code, 'PROFILE_NOT_FOUND');
-    assert.equal(database.streams.length, 0);
-    return true;
-  });
+  const error = await assertRejectsWithCode(ensureStreamRecord(database, sampleStream()), 'PROFILE_NOT_FOUND');
+  assert.ok(error instanceof StreamPersistenceError);
+  assert.equal(database.streams.length, 0);
 });
 
 test('maps database foreign-key errors to a safe missing-profile failure', async () => {
   const database = new FakeDatabase();
   database.insertError = { code: '23503', details: 'private FK detail' };
 
-  await assert.rejects(ensureStreamRecord(database, sampleStream()), (error) => {
-    assert.equal(error.code, 'PROFILE_NOT_FOUND');
-    assert.doesNotMatch(error.message, /private FK detail/);
-    return true;
-  });
+  const error = await assertRejectsWithCode(ensureStreamRecord(database, sampleStream()), 'PROFILE_NOT_FOUND');
+  assert.doesNotMatch(error.message, /private FK detail/);
 });
 
 test('does not accept a missing legacy owner', async () => {
   const database = new FakeDatabase();
-  await assert.rejects(ensureStreamRecord(database, sampleStream({ user_id: null })), (error) => {
-    assert.equal(error.code, 'STREAM_OWNER_REQUIRED');
-    assert.equal(database.streams.length, 0);
-    return true;
-  });
+  await assertRejectsWithCode(ensureStreamRecord(database, sampleStream({ user_id: null })), 'STREAM_OWNER_REQUIRED');
+  assert.equal(database.streams.length, 0);
 });
 
 test('destination persistence failure rejects start persistence instead of claiming success', async () => {
   const database = new FakeDatabase();
   database.destinationInsertError = { code: '42P01' };
-  await assert.rejects(ensureStreamRecord(database, sampleStream()), (error) => {
-    assert.equal(error.code, 'DESTINATION_PERSISTENCE_FAILED');
-    return true;
-  });
+  await assertRejectsWithCode(ensureStreamRecord(database, sampleStream()), 'DESTINATION_PERSISTENCE_FAILED');
 });
