@@ -49,6 +49,7 @@ services:
       - NODE_ENV=production
       - PORT=4000
       - DATA_DIR=/app/data
+      - UPLOADS_DIR=/app/uploads
       - QUEUE_NAME=streaming-queue
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -71,6 +72,7 @@ services:
       - "4000"
     volumes:
       - app-data:/app/data
+      - ../uploads/sample_lofi_broadcast_1080p60.mp4:/app/uploads/sample_lofi_broadcast_1080p60.mp4:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -133,6 +135,7 @@ services:
       - MAX_RESTART_RETRIES=5
       - WORKER_CONCURRENCY=10
       - MEMORY_CEILING_MB=1850
+      - UPLOADS_DIR=/app/uploads
       # Modular Storage Provider: Supabase active by default, switchable to R2
       - STORAGE_PROVIDER=${STORAGE_PROVIDER:-supabase}
       - SUPABASE_URL=${SUPABASE_URL}
@@ -152,6 +155,8 @@ services:
         condition: service_healthy
       backend-api:
         condition: service_started
+    volumes:
+      - ../uploads/sample_lofi_broadcast_1080p60.mp4:/app/uploads/sample_lofi_broadcast_1080p60.mp4:ro
     networks:
       - streampulse-net
     logging:

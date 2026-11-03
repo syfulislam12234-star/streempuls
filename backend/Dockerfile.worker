@@ -19,7 +19,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 # Copy worker application source files
-COPY worker.js queue.js supabase.js storage.js healthcheck-worker.js r2ObjectUrl.js streamDestinations.js redisLease.js streamLeaseRunner.js streamDiagnostics.js streamOwnership.js ./
+COPY worker.js queue.js supabase.js storage.js healthcheck-worker.js r2ObjectUrl.js streamDestinations.js redisLease.js streamLeaseRunner.js streamDiagnostics.js streamOwnership.js localVideoSource.js ./
 
 # Set environment
 ENV NODE_ENV=production
@@ -27,6 +27,7 @@ ENV QUEUE_NAME=streaming-queue
 ENV MAX_CONCURRENT_STREAMS=10
 ENV MAX_RESTART_RETRIES=5
 ENV MEMORY_CEILING_MB=1850
+ENV UPLOADS_DIR=/app/uploads
 
 # Non-root user for security (ensure user has permissions to execute ffmpeg)
 USER node

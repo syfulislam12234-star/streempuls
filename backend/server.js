@@ -9,7 +9,10 @@ import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { getR2Configuration } from './r2Config.js';
 import { validateStreamConfiguration } from './streamDestinations.js';
+import { ensureStreamRecord, StreamPersistenceError } from './streamPersistence.js';
+import { authenticateBearerToken, createStreamAuthMiddleware, getAccessibleStreams, getAuthorizedStream, isStreamAdmin } from './streamAccess.js';
 import { enqueueStreamStart } from './streamStart.js';
+import { supabase } from './supabase.js';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -19,7 +22,7 @@ const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const STREAMS_FILE = path.join(DATA_DIR, 'streams.json');
 const UPLOADED_ASSETS_FILE = path.join(DATA_DIR, 'uploaded_assets.json');
 const DIST_DIR = path.resolve(__dirname, '../dist');
-const UPLOADS_DIR = path.resolve(__dirname, '../uploads');
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.resolve(__dirname, '../uploads');
 const PAYMENT_SETTINGS_FILE = path.join(DATA_DIR, 'payment_settings.json');
 const SITE_CONTENT_FILE = path.join(DATA_DIR, 'site_content.json');
 const NOTIFICATIONS_FILE = path.join(DATA_DIR, 'notifications.json');
@@ -206,12 +209,10 @@ function safeUser(user) {
 }
 
 function getAuthenticatedUser(req) {
-  const bearerToken = req.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
-  if (!bearerToken) return null;
-
-  const tokenHash = createHash('sha256').update(bearerToken).digest('hex');
-  return readUsers().find((user) => user.auth_token_hash === tokenHash) || null;
+  return authenticateBearerToken(req.get('authorization'), readUsers());
 }
+
+const requireStreamAuthentication = createStreamAuthMiddleware(readUsers);
 
 function readUploadedAssets() {
   const assets = readJsonFile(UPLOADED_ASSETS_FILE, []);
@@ -714,9 +715,13 @@ app.post('/api/subscription/checkout', (req, res, next) => {
   }
 });
 
-app.get('/api/streams', (_req, res, next) => {
+// Every stream route requires a valid local Bearer session. x-user-id is
+// retained for legacy request compatibility but never establishes identity.
+app.use('/api/streams', requireStreamAuthentication);
+
+app.get('/api/streams', (req, res, next) => {
   try {
-    const streams = readStreams().sort((left, right) =>
+    const streams = getAccessibleStreams(req.streamUser, readStreams()).sort((left, right) =>
       new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
     return res.status(200).json({ success: true, streams });
   } catch (error) {
@@ -746,11 +751,11 @@ app.post('/api/streams', (req, res, next) => {
       return res.status(400).json({ success: false, error: error.message });
     }
 
-    const userId = req.get('x-user-id');
-    const user = getStreamUser(userId);
+    const user = req.streamUser;
+    const userId = user.id;
     const { channelLimit, destinationLimit } = getStreamLimits(user);
     const streams = readStreams();
-    const userStreams = streams.filter((stream) => !userId || stream.user_id === userId);
+    const userStreams = streams.filter((stream) => stream.user_id === userId);
     if (userStreams.length >= channelLimit) {
       return res.status(403).json({
         success: false,
@@ -796,7 +801,8 @@ app.post('/api/streams', (req, res, next) => {
 app.put('/api/streams/:id', (req, res, next) => {
   try {
     const streams = readStreams();
-    const index = streams.findIndex((stream) => stream.id === req.params.id);
+    const authorized = getAuthorizedStream(req.streamUser, streams, req.params.id);
+    const index = authorized ? streams.findIndex((stream) => stream.id === req.params.id) : -1;
     if (index === -1) return res.status(404).json({ success: false, error: 'Stream not found' });
 
     const patch = normalizeStreamPayload({ ...streams[index], ...req.body });
@@ -809,13 +815,15 @@ app.put('/api/streams/:id', (req, res, next) => {
         return res.status(400).json({ success: false, error: error.message });
       }
     }
-    if (patch.destinations.length > getStreamLimits(getStreamUser(req.get('x-user-id'))).destinationLimit) {
+    if (patch.destinations.length > getStreamLimits(req.streamUser).destinationLimit && !isStreamAdmin(req.streamUser)) {
       return res.status(403).json({ success: false, error: 'Your plan destination limit was exceeded.' });
     }
 
     const updated = {
       ...streams[index],
       ...patch,
+      id: streams[index].id,
+      user_id: streams[index].user_id,
       title: String(patch.title || '').trim().slice(0, 100),
       description: typeof patch.description === 'string' ? patch.description.slice(0, 500) : '',
       updated_at: new Date().toISOString(),
@@ -831,7 +839,8 @@ app.put('/api/streams/:id', (req, res, next) => {
 app.delete('/api/streams/:id', (req, res, next) => {
   try {
     const streams = readStreams();
-    const index = streams.findIndex((stream) => stream.id === req.params.id);
+    const authorized = getAuthorizedStream(req.streamUser, streams, req.params.id);
+    const index = authorized ? streams.findIndex((stream) => stream.id === req.params.id) : -1;
     if (index === -1) return res.status(404).json({ success: false, error: 'Stream not found' });
     streams.splice(index, 1);
     writeStreams(streams);
@@ -859,7 +868,24 @@ app.post('/api/streams/:id/start', async (req, res, next) => {
       queue: streamQueue,
       streamId: req.params.id,
       getStream: () => readStreams().find((stream) => stream.id === req.params.id),
-      getSubscriptionTier: (stream) => getStreamUser(req.get('x-user-id') || stream.user_id)?.subscription_tier || 'free',
+      getSubscriptionTier: (stream) => getStreamUser(stream.user_id)?.subscription_tier || req.streamUser.subscription_tier || 'free',
+      authorizeStream: (stream) => getAuthorizedStream(req.streamUser, [stream], stream.id) !== null,
+      ensureStreamRecord: async (stream) => {
+        if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+          const error = new Error('Supabase stream storage must be configured before a worker can start this stream.');
+          error.status = 503;
+          throw error;
+        }
+        try {
+          await ensureStreamRecord(supabase, stream);
+        } catch (cause) {
+          const code = cause instanceof StreamPersistenceError ? cause.code : 'STREAM_PERSISTENCE_FAILED';
+          const error = new Error('Unable to ensure the worker stream record in Supabase.');
+          error.status = code === 'PROFILE_NOT_FOUND' || code === 'STREAM_OWNER_REQUIRED' ? 409 : 503;
+          error.code = code;
+          throw error;
+        }
+      },
       markStarting: (stream) => {
         const streams = readStreams();
         const index = streams.findIndex((item) => item.id === stream.id);
@@ -900,7 +926,8 @@ app.post('/api/streams/:id/start', async (req, res, next) => {
 app.post('/api/streams/:id/stop', async (req, res, next) => {
   try {
     const streams = readStreams();
-    const index = streams.findIndex((stream) => stream.id === req.params.id);
+    const authorized = getAuthorizedStream(req.streamUser, streams, req.params.id);
+    const index = authorized ? streams.findIndex((stream) => stream.id === req.params.id) : -1;
     if (index === -1) return res.status(404).json({ success: false, error: 'Stream not found' });
 
     const { redisClient } = await import('./queue.js');
@@ -924,7 +951,7 @@ app.post('/api/streams/:id/stop', async (req, res, next) => {
 });
 
 app.get('/api/streams/:id/logs', (req, res) => {
-  const stream = readStreams().find((item) => item.id === req.params.id);
+  const stream = getAuthorizedStream(req.streamUser, readStreams(), req.params.id);
   if (!stream) return res.status(404).json({ success: false, error: 'Stream not found' });
   const isLive = stream.status === 'live' || stream.status === 'starting';
   return res.status(200).json({
@@ -936,7 +963,7 @@ app.get('/api/streams/:id/logs', (req, res) => {
 });
 
 app.get('/api/streams/:id/telemetry', (req, res) => {
-  const stream = readStreams().find((item) => item.id === req.params.id);
+  const stream = getAuthorizedStream(req.streamUser, readStreams(), req.params.id);
   if (!stream) return res.status(404).json({ success: false, error: 'Stream not found' });
   return res.status(200).json({
     success: true,
@@ -969,7 +996,11 @@ app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);
   if (req.path === '/api' || req.path.startsWith('/api/')) {
     const status = Number(error.status || error.statusCode) || 500;
-    return res.status(status).json({ success: false, error: error.message || 'Internal API error' });
+    return res.status(status).json({
+      success: false,
+      error: error.message || 'Internal API error',
+      ...(typeof error.code === 'string' ? { code: error.code } : {}),
+    });
   }
   return next(error);
 });

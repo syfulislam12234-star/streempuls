@@ -50,6 +50,7 @@ services:
       - WS_PORT=4001
       - CORS_ORIGINS=${CORS_ORIGINS:-https://streempuls.mooo.com,https://www.streempuls.mooo.com}
       - DATA_DIR=/app/data
+      - UPLOADS_DIR=/app/uploads
       - QUEUE_NAME=streaming-queue
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -115,6 +116,7 @@ services:
       - MAX_RESTART_RETRIES=5
       - WORKER_CONCURRENCY=10
       - MEMORY_CEILING_MB=1850
+      - UPLOADS_DIR=/app/uploads
       - STORAGE_PROVIDER=${STORAGE_PROVIDER:-supabase}
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}

@@ -22,6 +22,7 @@ import { Worker } from 'bullmq';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { redisConfig, redisClient, QUEUE_NAME } from './queue.js';
 import { supabase, SUPABASE_STORAGE_BUCKET, STORAGE_PROVIDER, getPublicStorageUrl, getSignedStorageUrl } from './supabase.js';
@@ -31,6 +32,7 @@ import { buildStreamDestinations } from './streamDestinations.js';
 import { runWithStreamLease } from './streamLeaseRunner.js';
 import { extractFfmpegErrorLines, sanitizeChildProcessError, sanitizeFfmpegDiagnostic } from './streamDiagnostics.js';
 import { claimStreamOwnership, updateStreamWhenOwned } from './streamOwnership.js';
+import { resolveLocalUpload } from './localVideoSource.js';
 
 dotenv.config();
 
@@ -45,6 +47,7 @@ const DEFAULT_CONCURRENCY = Math.min(parseInt(process.env.WORKER_CONCURRENCY || 
 let currentConcurrency = DEFAULT_CONCURRENCY;
 
 const HEARTBEAT_FILE = path.resolve('/tmp/worker-heartbeat.json');
+const DEFAULT_UPLOADS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../uploads');
 const MEMORY_CEILING_MB = parseInt(process.env.MEMORY_CEILING_MB || '1850', 10); // Hard limit 2048MB, soft cycle at 1850MB
 const CONTAINER_HARD_MEMORY_LIMIT_MB = 2048;
 
@@ -194,12 +197,13 @@ async function launchFfmpegStream(job, lease, abortSignal) {
   let refreshSignedInputSource = null;
   const sensitiveValues = [streamKey, ...(Array.isArray(destinations) ? destinations.map((destination) => destination?.streamKey) : [])];
   if (videoUrl && !videoUrl.startsWith('http://') && !videoUrl.startsWith('https://')) {
-    // Local file path - use directly if it starts with /
-    // Inside Docker container, uploaded files are accessible via absolute paths
-    // The video_url in streams.json uses /uploads/... format
+    // Resolve API-facing /uploads URLs against this worker's configured local
+    // directory; preserve other absolute paths for existing deployments.
     if (videoUrl.startsWith('/')) {
-      // Use local file path directly; FFmpeg can read absolute paths inside the container
-      inputSource = videoUrl;
+      inputSource = resolveLocalUpload(
+        videoUrl,
+        process.env.UPLOADS_DIR || DEFAULT_UPLOADS_DIR,
+      ) || videoUrl;
     } else {
       const r2Provider = STORAGE_PROVIDER === 'r2' ? getStorageProvider('r2') : null;
     const cleanPath = r2Provider

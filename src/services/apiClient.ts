@@ -616,13 +616,15 @@ export const apiClient = {
   // 2. Fetch all streams (resilient with local cache fallback)
   async getStreams(): Promise<StreamRecord[]> {
     try {
-      const res = await fetch('/api/streams');
+      const res = await fetch('/api/streams', { headers: getAuthHeaders() });
+      if (res.status === 401 || res.status === 403) throw new Error('Authentication required to view streams.');
       if (!res.ok) throw new Error('Failed to fetch streams');
       const data = await res.json();
       if (Array.isArray(data.streams)) {
         return data.streams;
       }
     } catch (e) {
+      if (e instanceof Error && e.message.startsWith('Authentication required')) throw e;
       // Graceful fallback during server restarts or transient offline states
     }
 
@@ -666,13 +668,9 @@ export const apiClient = {
     directCopyMode?: boolean;
     isLooping?: boolean;
   }): Promise<StreamRecord> {
-    const activeUserId = this.getStoredUserId();
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (activeUserId) headers['x-user-id'] = activeUserId;
-
     const res = await fetch('/api/streams', {
       method: 'POST',
-      headers,
+      headers: getAuthHeaders(),
       body: JSON.stringify(payload),
     });
     const data = await res.json();
@@ -697,13 +695,9 @@ export const apiClient = {
     directCopyMode?: boolean;
     isLooping?: boolean;
   }): Promise<StreamRecord> {
-    const activeUserId = this.getStoredUserId();
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (activeUserId) headers['x-user-id'] = activeUserId;
-
     const res = await fetch(`/api/streams/${id}`, {
       method: 'PUT',
-      headers,
+      headers: getAuthHeaders(),
       body: JSON.stringify(payload),
     });
     const data = await res.json();
@@ -713,13 +707,14 @@ export const apiClient = {
 
   // 4. Delete stream
   async deleteStream(id: string): Promise<void> {
-    const res = await fetch(`/api/streams/${id}`, { method: 'DELETE' });
-    if (!res.ok) throw new Error('Failed to delete stream');
+    const res = await fetch(`/api/streams/${id}`, { method: 'DELETE', headers: getAuthHeaders() });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to delete stream');
   },
 
   // 5. Start real isolated worker process
   async startStream(id: string): Promise<{ pid: number; status: string }> {
-    const res = await fetch(`/api/streams/${id}/start`, { method: 'POST' });
+    const res = await fetch(`/api/streams/${id}/start`, { method: 'POST', headers: getAuthHeaders() });
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to start stream');
     return { pid: data.pid, status: data.status };
@@ -727,7 +722,7 @@ export const apiClient = {
 
   // 6. Stop stream gracefully
   async stopStream(id: string): Promise<void> {
-    const res = await fetch(`/api/streams/${id}/stop`, { method: 'POST' });
+    const res = await fetch(`/api/streams/${id}/stop`, { method: 'POST', headers: getAuthHeaders() });
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to stop stream');
   },
@@ -735,12 +730,14 @@ export const apiClient = {
   // 7. Stream logs (resilient fallback if restarting or polling)
   async getStreamLogs(id: string): Promise<{ logs: string[]; isLive: boolean; pid: number | null }> {
     try {
-      const res = await fetch(`/api/streams/${id}/logs`);
+      const res = await fetch(`/api/streams/${id}/logs`, { headers: getAuthHeaders() });
+      if (res.status === 401 || res.status === 403) throw new Error('Authentication required to view stream logs.');
       if (res.ok) {
         const data = await res.json();
         return { logs: data.logs || [], isLive: Boolean(data.isLive), pid: data.pid ?? null };
       }
     } catch (e) {
+      if (e instanceof Error && e.message.startsWith('Authentication required')) throw e;
       // Graceful fallback during server restarts
     }
     return {
@@ -790,7 +787,7 @@ export const apiClient = {
     try {
       const res = await fetch('/api/streams/test-connection', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ rtmpServerUrl, streamKey }),
       });
       const data = await res.json();
@@ -799,6 +796,7 @@ export const apiClient = {
       }
       return { success: true, message: data.message };
     } catch (err: any) {
+      if (err?.message === 'Authentication required.') throw err;
       if (!streamKey.trim()) {
         throw new Error('Please enter your stream key before testing.');
       }
@@ -1092,22 +1090,51 @@ export const apiClient = {
 
   // 23. Real-Time Telemetry Snapshot & Event Streaming
   async getStreamTelemetry(streamId: string): Promise<StreamTelemetryData> {
-    const res = await fetch(`/api/streams/${streamId}/telemetry`);
+    const res = await fetch(`/api/streams/${streamId}/telemetry`, { headers: getAuthHeaders() });
     const data = await res.json();
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to fetch stream telemetry');
     return data.telemetry;
   },
 
   listenToStreamTelemetry(streamId: string, onData: (data: StreamTelemetryData) => void): () => void {
-    const eventSource = new EventSource(resolveApiUrl(`/api/streams/${streamId}/telemetry/stream`) as string);
-    eventSource.onmessage = (event) => {
-      try {
-        const parsed = JSON.parse(event.data);
-        if (parsed) onData(parsed);
-      } catch (e) {}
+    const controller = new AbortController();
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    const endpoint = resolveApiUrl(`/api/streams/${streamId}/telemetry/stream`) as string;
+    const connect = async () => {
+      while (!controller.signal.aborted) {
+        try {
+          const response = await fetch(endpoint, {
+            headers: getAuthHeaders({ Accept: 'text/event-stream' }),
+            signal: controller.signal,
+          });
+          if (response.status === 401 || response.status === 403 || !response.ok || !response.body) return;
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          while (!controller.signal.aborted) {
+            const { value, done } = await reader.read();
+            buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+            const events = buffer.split(/\r?\n\r?\n/);
+            buffer = events.pop() || '';
+            for (const event of events) {
+              const payload = event.split(/\r?\n/).find((line) => line.startsWith('data:'))?.slice(5).trim();
+              if (!payload) continue;
+              try { onData(JSON.parse(payload)); } catch {}
+            }
+            if (done) break;
+          }
+        } catch {
+          if (controller.signal.aborted) return;
+        }
+        await new Promise<void>((resolve) => {
+          reconnectTimer = setTimeout(resolve, 2_000);
+        });
+      }
     };
+    void connect();
     return () => {
-      eventSource.close();
+      controller.abort();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
     };
   },
 
