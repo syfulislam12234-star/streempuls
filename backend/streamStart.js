@@ -81,7 +81,6 @@ export async function enqueueStreamStart({
         }
       }
     }
-  }
   const lockKey = `streempulse:start-request:${streamId}`;
   const result = await withRedisLease(redis, lockKey, async () => {
     const stream = await getStream();
