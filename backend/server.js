@@ -12,7 +12,7 @@ import { validateStreamConfiguration } from './streamDestinations.js';
 import { ensureStreamRecord, StreamPersistenceError } from './streamPersistence.js';
 import { authenticateBearerToken, createStreamAuthMiddleware, getAccessibleStreams, getAuthorizedStream, isStreamAdmin, upsertUserToSupabase } from './streamAccess.js';
 import { enqueueStreamStart } from './streamStart.js';
-import { supabase } from './supabase.js';
+import { supabase, SUPABASE_ADMIN_CONFIGURED } from './supabase.js';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -883,7 +883,7 @@ app.post('/api/streams/:id/start', async (req, res, next) => {
       getSubscriptionTier: (stream) => readUsers().find((user) => user.id === stream.user_id)?.subscription_tier || 'free',
       authorizeStream: (stream) => getAuthorizedStream(req.streamUser, [stream], stream.id) !== null,
       ensureStreamRecord: async (stream) => {
-        if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+        if (!SUPABASE_ADMIN_CONFIGURED) {
           const error = new Error('Supabase stream storage must be configured before a worker can start this stream.');
           error.status = 503;
           throw error;
@@ -900,7 +900,16 @@ app.post('/api/streams/:id/start', async (req, res, next) => {
         } catch (cause) {
           if (cause?.code === 'STREAM_OWNER_NOT_FOUND') throw cause;
           const code = cause instanceof StreamPersistenceError ? cause.code : 'STREAM_PERSISTENCE_FAILED';
-          const error = new Error('Unable to ensure the worker stream record in Supabase.');
+          if (cause instanceof StreamPersistenceError) {
+            console.error('[Stream Persistence Error]', {
+              streamId: stream.id,
+              code,
+              databaseCode: cause.databaseCode || undefined,
+            });
+          }
+          const error = new Error(cause instanceof StreamPersistenceError
+            ? cause.message
+            : 'Unable to ensure the worker stream record in Supabase.');
           error.status = code === 'PROFILE_NOT_FOUND' || code === 'STREAM_OWNER_REQUIRED'
             || code === 'PROFILE_IDENTITY_REQUIRED' || code === 'SUPABASE_AUTH_USER_REQUIRED'
             ? 409

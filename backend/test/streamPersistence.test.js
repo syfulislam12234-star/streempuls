@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 import {
   buildStreamInsertPayload,
@@ -55,6 +56,8 @@ class FakeQuery {
   select(columns) { this.columns = columns; return this; }
   eq(column, value) { this.filters.push([column, value]); return this; }
   async maybeSingle() {
+    const lookupError = this.db.lookupErrors?.[this.table];
+    if (lookupError) return { data: null, error: lookupError };
     const row = this.db[this.table].find((item) => this.filters.every(([key, value]) => item[key] === value));
     return { data: row ? { ...row } : null, error: null };
   }
@@ -123,6 +126,7 @@ class FakeDatabase {
       error: null,
     }) } };
     this.rejectNonUuidProfileIds = false;
+    this.lookupErrors = {};
   }
   from(table) {
     assert.ok(['streams', 'profiles', 'stream_destinations'].includes(table));
@@ -165,6 +169,19 @@ test('parent insert contains only base streams columns and persists destinations
     stream_key: 'backup-private-key',
     is_enabled: true,
   }]);
+});
+
+test('enterprise schema declares every worker stream column and service-role access', () => {
+  const schema = fs.readFileSync(new URL('../../supabase_enterprise_schema.sql', import.meta.url), 'utf8');
+  const createStreams = schema.match(/CREATE TABLE IF NOT EXISTS public\.streams\s*\(([\s\S]*?)\n\);/i)?.[1];
+  assert.ok(createStreams, 'the migration must create public.streams before dependent tables');
+
+  for (const column of Object.keys(buildStreamInsertPayload(sampleStream()))) {
+    assert.match(createStreams, new RegExp(`^\\s*${column}\\s`, 'im'), `streams schema must define ${column}`);
+  }
+  assert.match(schema, /ALTER TABLE public\.streams\s+[\s\S]*ADD COLUMN IF NOT EXISTS ffmpeg_pid/i);
+  assert.match(schema, /ALTER TABLE public\.streams ENABLE ROW LEVEL SECURITY/i);
+  assert.match(schema, /GRANT ALL ON TABLE public\.streams, public\.stream_destinations TO service_role/i);
 });
 
 test('automatically provisions a conservative default profile for a verified local user', async () => {
@@ -351,6 +368,7 @@ test('maps database foreign-key errors to a safe profile failure', async () => {
 
   const error = await assertRejectsWithCode(ensureStreamRecord(database, sampleStream(), sampleOwner()), 'PROFILE_NOT_FOUND');
   assert.doesNotMatch(error.message, /private FK detail/);
+  assert.match(error.message, /UUID\/Auth-linked schema.*text-ID enterprise profile schema/i);
 });
 
 test('rejects a missing authenticated owner without persistence', async () => {
@@ -365,4 +383,29 @@ test('destination persistence failure rejects start persistence instead of claim
   database.destinationInsertError = { code: '42P01' };
 
   await assertRejectsWithCode(ensureStreamRecord(database, sampleStream(), sampleOwner()), 'DESTINATION_PERSISTENCE_FAILED');
+});
+
+test('missing streams table returns actionable schema migration guidance', async () => {
+  const database = new FakeDatabase();
+  database.lookupErrors.streams = { code: '42P01' };
+
+  const error = await assertRejectsWithCode(
+    ensureStreamRecord(database, sampleStream(), sampleOwner()),
+    'STREAM_LOOKUP_FAILED',
+  );
+  assert.equal(error.databaseCode, '42P01');
+  assert.match(error.message, /missing a required table.*supabase_enterprise_schema\.sql/i);
+});
+
+test('RLS permission failures identify the required service-role configuration', async () => {
+  const database = new FakeDatabase();
+  database.profileInsertError = { code: '42501' };
+
+  const error = await assertRejectsWithCode(
+    ensureStreamRecord(database, sampleStream(), sampleOwner()),
+    'PROFILE_PROVISION_FAILED',
+  );
+  assert.equal(error.databaseCode, '42501');
+  assert.match(error.message, /service-role key.*FORCE RLS/i);
+  assert.equal(database.streams.length, 0);
 });

@@ -18,8 +18,9 @@ dotenv.config();
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+export const SUPABASE_ADMIN_CONFIGURED = Boolean(supabaseUrl && supabaseServiceKey);
 
-if (!supabaseUrl || !supabaseServiceKey) {
+if (!SUPABASE_ADMIN_CONFIGURED) {
   console.warn('[Supabase Warning] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing from environment.');
 }
 

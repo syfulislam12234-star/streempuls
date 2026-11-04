@@ -7,11 +7,25 @@ const STREAM_COLUMNS = [
 const DESTINATION_PLATFORMS = new Set(['youtube', 'twitch', 'kick', 'custom']);
 
 export class StreamPersistenceError extends Error {
-  constructor(code, message) {
+  constructor(code, message, databaseCode = null) {
     super(message);
     this.name = 'StreamPersistenceError';
     this.code = code;
+    this.databaseCode = databaseCode;
   }
+}
+
+function databaseFailure(error, code, fallbackMessage) {
+  const databaseCode = typeof error?.code === 'string' ? error.code : null;
+  let message = fallbackMessage;
+  if (databaseCode === '42P01' || databaseCode === 'PGRST205') {
+    message = 'The Supabase stream schema is missing a required table. Apply supabase_enterprise_schema.sql.';
+  } else if (databaseCode === '42703' || databaseCode === 'PGRST204') {
+    message = 'The Supabase stream schema is missing a required column. Apply the latest schema migration.';
+  } else if (databaseCode === '42501') {
+    message = 'Supabase denied stream persistence. Configure the backend with the service-role key and do not FORCE RLS on worker tables.';
+  }
+  return new StreamPersistenceError(code, message, databaseCode);
 }
 
 /** Project only base streams-table columns; destinations use stream_destinations. */
@@ -68,7 +82,7 @@ async function persistDestinations(database, destinations, streamId) {
   const { data: existing, error: lookupError } = await database
     .from('stream_destinations').select(columns).eq('stream_id', streamId);
   if (lookupError) {
-    throw new StreamPersistenceError('DESTINATION_STORAGE_UNAVAILABLE', 'Could not verify Supabase stream destinations or permissions.');
+    throw databaseFailure(lookupError, 'DESTINATION_STORAGE_UNAVAILABLE', 'Could not verify Supabase stream destinations or permissions.');
   }
 
   const rows = Array.isArray(existing) ? existing : [];
@@ -85,7 +99,7 @@ async function persistDestinations(database, destinations, streamId) {
     .from('stream_destinations').select(columns).eq('stream_id', streamId);
   const confirmedRows = Array.isArray(confirmed) ? confirmed : [];
   if (confirmError || destinations.some((destination) => !confirmedRows.some((row) => sameDestination(row, destination)))) {
-    throw new StreamPersistenceError('DESTINATION_PERSISTENCE_FAILED', 'Could not persist all configured stream destinations.');
+    throw databaseFailure(insertError || confirmError, 'DESTINATION_PERSISTENCE_FAILED', 'Could not persist all configured stream destinations.');
   }
 }
 
@@ -118,7 +132,7 @@ async function findProfile(database, owner) {
   // alternate schema casts profile IDs to UUID. In that case, still try the
   // exact verified email mapping instead of failing before resolving identity.
   if (idError && idError.code !== '22P02') {
-    throw new StreamPersistenceError('PROFILE_LOOKUP_FAILED', 'Could not verify the user profile in Supabase.');
+    throw databaseFailure(idError, 'PROFILE_LOOKUP_FAILED', 'Could not verify the user profile in Supabase.');
   }
   if (byId) {
     if (byId.email && byId.email.trim().toLowerCase() !== owner.email.trim().toLowerCase()) {
@@ -130,7 +144,7 @@ async function findProfile(database, owner) {
   const { data: byEmail, error: emailError } = await database
     .from('profiles').select('id,email').eq('email', owner.email.trim().toLowerCase()).maybeSingle();
   if (emailError) {
-    throw new StreamPersistenceError('PROFILE_LOOKUP_FAILED', 'Could not verify the user profile in Supabase.');
+    throw databaseFailure(emailError, 'PROFILE_LOOKUP_FAILED', 'Could not verify the user profile in Supabase.');
   }
   return byEmail || null;
 }
@@ -176,9 +190,13 @@ export async function ensureProfileRecord(database, owner) {
     const concurrent = await findProfile(database, owner).catch(() => null);
     if (concurrent) return concurrent;
     if (result.error.code === '23503') {
-      throw new StreamPersistenceError('PROFILE_NOT_FOUND', 'The matching Supabase Auth user/profile is missing or violates a foreign key.');
+      throw databaseFailure(
+        result.error,
+        'PROFILE_NOT_FOUND',
+        'Supabase rejected the profile foreign key. The UUID/Auth-linked schema requires a matching auth.users identity; this custom-auth backend requires the text-ID enterprise profile schema.',
+      );
     }
-    throw new StreamPersistenceError('PROFILE_PROVISION_FAILED', 'Could not create the default Supabase profile.');
+    throw databaseFailure(result.error, 'PROFILE_PROVISION_FAILED', 'Could not create the default Supabase profile.');
   }
 
   if (result.data) return result.data;
@@ -205,7 +223,7 @@ export async function ensureStreamRecord(database, stream, owner) {
     .eq('id', stream.id)
     .maybeSingle();
   if (lookupError) {
-    throw new StreamPersistenceError('STREAM_LOOKUP_FAILED', 'Could not verify the stream record in Supabase.');
+    throw databaseFailure(lookupError, 'STREAM_LOOKUP_FAILED', 'Could not verify the stream record in Supabase.');
   }
   if (existing) {
     if (!sameStream(existing, databaseStream, profileId)) {
@@ -215,16 +233,16 @@ export async function ensureStreamRecord(database, stream, owner) {
     return false;
   }
 
-  const { error: insertError } = await database.from('streams').insert(buildStreamInsertPayload(databaseStream, profileId));
+  const { error: insertError } = await database.from('streams').insert(buildStreamInsertPayload(databaseStream));
   let inserted = !insertError;
   if (insertError) {
     const { data: concurrent, error: confirmError } = await database
       .from('streams').select('id,user_id,video_url,stream_key,rtmp_server_url').eq('id', stream.id).maybeSingle();
     if (confirmError || !concurrent || !sameStream(concurrent, databaseStream, profileId)) {
       if (insertError.code === '23503') {
-        throw new StreamPersistenceError('PROFILE_NOT_FOUND', 'The stream owner profile is missing from Supabase; the stream was not queued.');
+        throw databaseFailure(insertError, 'PROFILE_NOT_FOUND', 'The stream owner profile is missing from Supabase; the stream was not queued.');
       }
-      throw new StreamPersistenceError('STREAM_INSERT_FAILED', 'Could not persist the stream record in Supabase.');
+      throw databaseFailure(insertError || confirmError, 'STREAM_INSERT_FAILED', 'Could not persist the stream record in Supabase.');
     }
     inserted = false;
   }

@@ -81,6 +81,70 @@ REVOKE ALL ON TABLE public.users FROM anon, authenticated;
 GRANT ALL ON TABLE public.users TO service_role;
 
 -- ----------------------------------------------------------------------------
+-- 1c. STREAMS TABLE
+-- Worker/API persistence uses a service-role Supabase client. TEXT identifiers
+-- match the custom-auth account IDs and local stream catalog used by backend.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.streams (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  description TEXT,
+  video_url TEXT NOT NULL,
+  stream_key TEXT NOT NULL,
+  rtmp_server_url TEXT NOT NULL DEFAULT 'rtmp://a.rtmp.youtube.com/live2',
+  is_looping BOOLEAN NOT NULL DEFAULT TRUE,
+  direct_copy_mode BOOLEAN NOT NULL DEFAULT TRUE,
+  status TEXT NOT NULL DEFAULT 'idle',
+  ffmpeg_pid INTEGER,
+  worker_node_id TEXT,
+  last_heartbeat TIMESTAMPTZ,
+  uptime_seconds BIGINT NOT NULL DEFAULT 0,
+  current_bitrate_kbps INTEGER NOT NULL DEFAULT 0,
+  fps NUMERIC(5, 2) NOT NULL DEFAULT 0,
+  cpu_usage_pct NUMERIC(5, 2) NOT NULL DEFAULT 0,
+  mem_usage_mb NUMERIC(8, 2) NOT NULL DEFAULT 0,
+  last_error TEXT,
+  logs JSONB NOT NULL DEFAULT '[]'::jsonb,
+  last_started_at TIMESTAMPTZ,
+  last_stopped_at TIMESTAMPTZ,
+  orientation VARCHAR(20) NOT NULL DEFAULT 'horizontal',
+  category VARCHAR(50) NOT NULL DEFAULT 'Entertainment',
+  audience VARCHAR(30) NOT NULL DEFAULT 'not_for_kids',
+  thumbnail_url TEXT,
+  visibility VARCHAR(20) NOT NULL DEFAULT 'public',
+  scheduled_for TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Bring an existing streams table up to the worker persistence contract too.
+ALTER TABLE public.streams
+  ADD COLUMN IF NOT EXISTS description TEXT,
+  ADD COLUMN IF NOT EXISTS rtmp_server_url TEXT NOT NULL DEFAULT 'rtmp://a.rtmp.youtube.com/live2',
+  ADD COLUMN IF NOT EXISTS is_looping BOOLEAN NOT NULL DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS direct_copy_mode BOOLEAN NOT NULL DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'idle',
+  ADD COLUMN IF NOT EXISTS ffmpeg_pid INTEGER,
+  ADD COLUMN IF NOT EXISTS worker_node_id TEXT,
+  ADD COLUMN IF NOT EXISTS last_heartbeat TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS uptime_seconds BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS current_bitrate_kbps INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS fps NUMERIC(5, 2) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS cpu_usage_pct NUMERIC(5, 2) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS mem_usage_mb NUMERIC(8, 2) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS last_error TEXT,
+  ADD COLUMN IF NOT EXISTS logs JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS last_started_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS last_stopped_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+CREATE INDEX IF NOT EXISTS idx_streams_user_id ON public.streams(user_id);
+CREATE INDEX IF NOT EXISTS idx_streams_status ON public.streams(status);
+CREATE INDEX IF NOT EXISTS idx_streams_user_status ON public.streams(user_id, status);
+
+-- ----------------------------------------------------------------------------
 -- 2. USER REFERRALS TABLE
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.user_referrals (
@@ -208,12 +272,19 @@ CREATE INDEX IF NOT EXISTS idx_tutorial_category ON public.tutorial_videos(categ
 -- Row-Level Security (RLS) Rules for Supabase
 -- ----------------------------------------------------------------------------
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.streams ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_referrals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.coupons ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.stream_destinations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.stream_telemetry_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.tutorial_videos ENABLE ROW LEVEL SECURITY;
+
+-- API/worker operations use the service-role key and do not depend on end-user
+-- RLS policies. Do not configure FORCE ROW LEVEL SECURITY on these tables.
+REVOKE ALL ON TABLE public.streams, public.stream_destinations FROM anon, authenticated;
+GRANT ALL ON TABLE public.streams, public.stream_destinations TO service_role;
+GRANT ALL ON TABLE public.profiles TO service_role;
 
 -- RLS Policies
 CREATE POLICY "Public read tutorial videos" ON public.tutorial_videos
