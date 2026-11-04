@@ -210,9 +210,14 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       ? normalizeR2ObjectKey(videoUrl, r2Provider.bucket)
       : videoUrl.replace(/^(stream-assets|live-stream-assets)\//, '').replace(/^\/+/, '');
     if (r2Provider) await r2Provider.headObject(cleanPath);
-    const signedUrl = r2Provider
-      ? await r2Provider.getSignedUrl(cleanPath, SIGNED_SOURCE_URL_TTL_MS / 1000)
-      : await getSignedStorageUrl(cleanPath);
+    let signedUrl = null;
+    try {
+      signedUrl = r2Provider
+        ? await r2Provider.getSignedUrl(cleanPath, SIGNED_SOURCE_URL_TTL_MS / 1000)
+        : await getSignedStorageUrl(cleanPath);
+    } catch (signErr) {
+      console.warn(`[FFmpeg Engine] Storage URL signing failed for stream ${streamId}: ${signErr.message`});
+    }
     inputSource = signedUrl || getPublicStorageUrl(cleanPath);
     if (signedUrl) {
       const provider = r2Provider || getStorageProvider(STORAGE_PROVIDER);
@@ -247,9 +252,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         }
       }
     } catch (signErr) {
-      const signingError = `Storage URL signing failed for stream ${streamId}: unable to obtain a signed playback URL.`;
-      console.warn(`[FFmpeg Engine] ${signingError}`);
-      throw new Error(signingError);
+      console.warn(`[FFmpeg Engine] Storage URL signing failed for stream ${streamId}: ${signErr.message}`);
     }
   }
 
@@ -1270,3 +1273,4 @@ async function resetStuckStreams() {
 
 process.on('SIGTERM', () => shutdownWorker('SIGTERM'));
 process.on('SIGINT', () => shutdownWorker('SIGINT'));
+

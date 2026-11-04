@@ -172,7 +172,11 @@ export class CloudflareR2StorageAdapter {
       const { GetObjectCommand } = await import('@aws-sdk/client-s3');
       const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
       const command = new GetObjectCommand({ Bucket: this.bucket, Key: cleanPath });
-      return await getSignedUrl(this.s3Client, command, { expiresIn: expiresInSeconds });
+      // R2 (S3-compatible) presigned URLs require signing the 'host' header for signature validity.
+      return await getSignedUrl(this.s3Client, command, {
+        expiresIn: expiresInSeconds,
+        signableHeaders: new Set(['host']),
+      });
     } catch (err) {
       throw new Error(`Cloudflare R2 signing failed for object '${cleanPath}': ${err.message}`);
     }
