@@ -49,15 +49,36 @@ export async function upsertUserToSupabase(user, database = supabase) {
     throw new TypeError(`Cannot sync user: required fields are missing (${missingFields.join(', ')}).`);
   }
 
-  const columns = [
-    'id', 'email', 'full_name', 'role', 'subscription_tier', 'subscription_status',
-    'channel_limit', 'video_limit', 'duration_days', 'hour_limit', 'has_watermark',
-    'is_brand_free', 'price_bdt', 'password_hash', 'password_salt', 'auth_token_hash',
-    'expires_at', 'referral_code', 'reward_credits_bdt', 'trial_days_bonus', 'created_at', 'updated_at',
-  ];
-  const payload = Object.fromEntries(columns
-    .filter((column) => user?.[column] !== undefined)
-    .map((column) => [column, user[column]]));
+  const role = user.role === 'admin' || user.role === 'super_admin' ? user.role : 'user';
+  const subscriptionTier = typeof user.subscription_tier === 'string' ? user.subscription_tier : 'free';
+  const now = new Date().toISOString();
+  const payload = {
+    id: user.id.trim(),
+    email: user.email.trim().toLowerCase(),
+    full_name: typeof user.full_name === 'string' && user.full_name.trim() ? user.full_name.trim() : user.email.trim().split('@')[0],
+    role,
+    admin: role === 'admin' || role === 'super_admin',
+    subscription_tier: subscriptionTier,
+    subscription_status: typeof user.subscription_status === 'string' ? user.subscription_status : 'unpaid',
+    business: user.business === true || subscriptionTier === 'business',
+    channel_limit: user.channel_limit ?? 1,
+    video_limit: user.video_limit ?? 1,
+    duration_days: user.duration_days ?? 3,
+    hour_limit: user.hour_limit ?? 10,
+    has_watermark: user.has_watermark ?? true,
+    is_brand_free: user.is_brand_free ?? false,
+    price_bdt: user.price_bdt ?? 0,
+    password_hash: user.password_hash,
+    password_salt: user.password_salt,
+    auth_token_hash: user.auth_token_hash,
+    expires_at: user.expires_at ?? null,
+    referral_code: user.referral_code ?? null,
+    referred_by_code: user.referred_by_code ?? null,
+    reward_credits_bdt: user.reward_credits_bdt ?? 0,
+    trial_days_bonus: user.trial_days_bonus ?? 0,
+    created_at: user.created_at || now,
+    updated_at: user.updated_at || now,
+  };
 
   try {
     const { error } = await database.from('users').upsert(payload, { onConflict: 'id' });

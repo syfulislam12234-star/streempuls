@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import test from 'node:test';
 import {
   authenticateBearerToken,
@@ -104,6 +105,10 @@ test('new custom-auth users are upserted into public.users with conflict handlin
   const user = {
     id: 'new-user',
     email: 'new@example.test',
+    role: 'user',
+    subscription_tier: 'business',
+    subscription_status: 'unpaid',
+    created_at: '2026-01-02T03:04:05.000Z',
     password_hash: 'one-way-password-hash',
     password_salt: 'salt',
     auth_token_hash: 'one-way-token-hash',
@@ -112,7 +117,15 @@ test('new custom-auth users are upserted into public.users with conflict handlin
   await upsertUserToSupabase(user, database);
 
   assert.equal(insertedTable, 'users');
-  assert.deepEqual(insertedUser, user);
+  assert.equal(insertedUser.id, user.id);
+  assert.equal(insertedUser.email, user.email);
+  assert.equal(insertedUser.created_at, user.created_at);
+  assert.equal(insertedUser.admin, false);
+  assert.equal(insertedUser.subscription_status, 'unpaid');
+  assert.equal(insertedUser.business, true);
+  assert.equal(insertedUser.password_hash, user.password_hash);
+  assert.equal(insertedUser.password_salt, user.password_salt);
+  assert.equal(insertedUser.auth_token_hash, user.auth_token_hash);
   assert.deepEqual(options, { onConflict: 'id' });
 });
 
@@ -150,13 +163,30 @@ test('user upsert excludes fields outside the public.users schema', async () => 
     clientOnly: true,
   }, database);
 
-  assert.deepEqual(insertedUser, {
-    id: 'new-user',
-    email: 'new@example.test',
-    password_hash: 'hash',
-    password_salt: 'salt',
-    auth_token_hash: 'token-hash',
-  });
+  assert.equal(insertedUser.id, 'new-user');
+  assert.equal(insertedUser.email, 'new@example.test');
+  assert.equal(insertedUser.admin, false);
+  assert.equal(insertedUser.business, false);
+  assert.equal(insertedUser.password_hash, 'hash');
+  assert.equal(insertedUser.password_salt, 'salt');
+  assert.equal(insertedUser.auth_token_hash, 'token-hash');
+  assert.equal(Object.hasOwn(insertedUser, 'password'), false);
+  assert.equal(Object.hasOwn(insertedUser, 'clientOnly'), false);
+});
+
+test('enterprise users schema includes all custom registration columns', () => {
+  const schema = fs.readFileSync(new URL('../../supabase_enterprise_schema.sql', import.meta.url), 'utf8');
+  const usersTable = schema.match(/CREATE TABLE IF NOT EXISTS public\.users\s*\(([\s\S]*?)\n\);/i)?.[1];
+  assert.ok(usersTable, 'migration must create public.users');
+  for (const column of [
+    'id', 'email', 'full_name', 'created_at', 'updated_at', 'role', 'admin',
+    'subscription_tier', 'subscription_status', 'business', 'channel_limit',
+    'password_hash', 'password_salt', 'auth_token_hash',
+  ]) {
+    assert.match(usersTable, new RegExp(`^\\s*${column}\\s`, 'im'), `users table must define ${column}`);
+  }
+  assert.match(schema, /ADD COLUMN IF NOT EXISTS referred_by_code VARCHAR\(30\)/i);
+  assert.match(schema, /CREATE UNIQUE INDEX IF NOT EXISTS users_id_upsert_uidx ON public\.users\(id\)/i);
 });
 
 test('Supabase user sync failures are not swallowed', async () => {
