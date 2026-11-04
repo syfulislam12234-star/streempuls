@@ -39,7 +39,7 @@ dotenv.config();
 // ----------------------------------------------------------------------------
 // Worker Node Identity & Capacity Configuration
 // ----------------------------------------------------------------------------
-export const WORKER_NODE_ID = process.env.WORKER_NODE_ID || `worker-node-${process.pid}`;
+export const WORKER_NODE_ID = process.env.WORKER_NODE_ID || 'worker-node-' + process.pid;
 export const MAX_CONCURRENT_STREAMS = parseInt(process.env.MAX_CONCURRENT_STREAMS || '10', 10);
 export const MAX_RESTART_RETRIES = parseInt(process.env.MAX_RESTART_RETRIES || '5', 10);
 const BASE_RECONNECT_DELAY_MS = 3000; // 3-second base exponential backoff
@@ -51,14 +51,15 @@ const DEFAULT_UPLOADS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.
 const MEMORY_CEILING_MB = parseInt(process.env.MEMORY_CEILING_MB || '1850', 10); // Hard limit 2048MB, soft cycle at 1850MB
 const CONTAINER_HARD_MEMORY_LIMIT_MB = 2048;
 
-console.log(`====================================================================`);
-console.log(`[StreamPulse Worker] Node ID: ${WORKER_NODE_ID}`);
-console.log(`[StreamPulse Worker] Queue: "${QUEUE_NAME}"`);
-console.log(`[StreamPulse Worker] Hard Limit: MAX ${MAX_CONCURRENT_STREAMS} concurrent streams per container`);
-console.log(`[StreamPulse Worker] Auto-Recovery: MAX ${MAX_RESTART_RETRIES} retries with ${BASE_RECONNECT_DELAY_MS / 1000}s exponential backoff`);
-console.log(`[StreamPulse Worker] Zero-Lag Stream Pacing: -fflags nobuffer, -flags low_delay, -rtbufsize 1024M, -muxdelay 0.1`);
-console.log(`[StreamPulse Worker] Storage Provider: ${STORAGE_PROVIDER.toUpperCase()} (Bucket: ${SUPABASE_STORAGE_BUCKET})`);
-console.log(`====================================================================`);
+console.log('====================================================================');
+console.log('[StreamPulse Worker] Node ID: ' + WORKER_NODE_ID);
+console.log('[StreamPulse Worker] Queue: "' + QUEUE_NAME + '"');
+console.log('[StreamPulse Worker] Hard Limit: MAX ' + MAX_CONCURRENT_STREAMS + ' concurrent streams per container');
+var reconnectDelaySecs = BASE_RECONNECT_DELAY_MS / 1000;
+console.log('[StreamPulse Worker] Auto-Recovery: MAX ' + MAX_RESTART_RETRIES + ' retries with ' + reconnectDelaySecs + 's exponential backoff');
+console.log('[StreamPulse Worker] Zero-Lag Stream Pacing: -fflags nobuffer, -flags low_delay, -rtbufsize 1024M, -muxdelay 0.1');
+console.log('[StreamPulse Worker] Storage Provider: ' + STORAGE_PROVIDER.toUpperCase() + ' (Bucket: ' + SUPABASE_STORAGE_BUCKET + ')');
+console.log('====================================================================');
 
 // ----------------------------------------------------------------------------
 // 1. Process Registry: Isolated Stream Tracking
@@ -101,7 +102,7 @@ function terminateFfmpegChild(child, gracePeriodMs = 5000) {
 function redactUrlQuery(value) {
   try {
     const url = new URL(value);
-    return url.search ? `${url.origin}${url.pathname}?[REDACTED]` : value;
+    return url.search ? url.origin + url.pathname + '?[REDACTED]' : value;
   } catch {
     return value;
   }
@@ -119,14 +120,14 @@ export async function stopStreamProcess(streamId, reason = 'User requested stop'
     const pendingStart = pendingStreamStarts.get(streamId);
     if (pendingStart) {
       pendingStart.abortController.abort();
-      console.log(`[Process Tracker] Cancelled pending start for stream ${streamId} on worker node ${WORKER_NODE_ID}.`);
+      console.log('[Process Tracker] Cancelled pending start for stream ' + streamId + ' on worker node ' + WORKER_NODE_ID + '.');
       return true;
     }
-    console.log(`[Process Tracker] Stream ${streamId} not running on worker node ${WORKER_NODE_ID}.`);
+    console.log('[Process Tracker] Stream ' + streamId + ' not running on worker node ' + WORKER_NODE_ID + '.');
     return false;
   }
 
-  console.log(`[Process Tracker] Terminating stream ${streamId} (Reason: ${reason})`);
+  console.log('[Process Tracker] Terminating stream ' + streamId + ' (Reason: ' + reason + ')');
   streamInstance.isIntentionalStop = true;
 
   if (typeof streamInstance.stop === 'function') {
@@ -137,7 +138,7 @@ export async function stopStreamProcess(streamId, reason = 'User requested stop'
   return new Promise((resolve) => {
     const forceKillTimer = setTimeout(() => {
       try {
-        console.warn(`[Process Tracker] Stream ${streamId} PID ${pid} did not exit in 5s. Sending SIGKILL.`);
+        console.warn('[Process Tracker] Stream ' + streamId + ' PID ' + pid + ' did not exit in 5s. Sending SIGKILL.');
         child?.kill('SIGKILL');
       } catch (err) {}
     }, 5000);
@@ -145,7 +146,7 @@ export async function stopStreamProcess(streamId, reason = 'User requested stop'
     child?.once('exit', () => {
       clearTimeout(forceKillTimer);
       activeStreams.delete(streamId);
-      console.log(`[Process Tracker] Stream ${streamId} stopped. Remaining active: ${activeStreams.size}/${MAX_CONCURRENT_STREAMS}`);
+      console.log('[Process Tracker] Stream ' + streamId + ' stopped. Remaining active: ' + activeStreams.size + '/' + MAX_CONCURRENT_STREAMS);
       resolve(true);
     });
 
@@ -169,9 +170,9 @@ async function launchFfmpegStream(job, lease, abortSignal) {
   // When a worker container reaches 10 active streams, route new stream requests dynamically
   // to the next available idle worker node via BullMQ failover.
   if (activeStreams.size >= MAX_CONCURRENT_STREAMS) {
-    const overloadNotice = `[Container Overload Auto-Shift] Worker container ${WORKER_NODE_ID} saturated (${activeStreams.size}/${MAX_CONCURRENT_STREAMS}). Auto-shifting stream ${streamId} to next idle worker node...`;
+    var overloadNotice = '[Container Overload Auto-Shift] Worker container ' + WORKER_NODE_ID + ' saturated (' + activeStreams.size + '/' + MAX_CONCURRENT_STREAMS + '). Auto-shifting stream ' + streamId + ' to next idle worker node...';
     console.warn(overloadNotice);
-    throw new Error(`CONTAINER_OVERLOAD: ${overloadNotice}`);
+    throw new Error('CONTAINER_OVERLOAD: ' + overloadNotice);
   }
   if (activeStreams.has(streamId)) {
     throw new Error('This worker already owns a process for the requested stream.');
@@ -208,7 +209,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       const r2Provider = STORAGE_PROVIDER === 'r2' ? getStorageProvider('r2') : null;
     const cleanPath = r2Provider
       ? normalizeR2ObjectKey(videoUrl, r2Provider.bucket)
-      : videoUrl.replace(/^(stream-assets|live-stream-assets)\//, '').replace(/^\/+/, '');
+      : videoUrl.replace(/^(stream-assets|live-stream-assets)\\//, '').replace(/^\\/+/, '');
     if (r2Provider) await r2Provider.headObject(cleanPath);
     let signedUrl = null;
     try {
@@ -216,7 +217,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         ? await r2Provider.getSignedUrl(cleanPath, SIGNED_SOURCE_URL_TTL_MS / 1000)
         : await getSignedStorageUrl(cleanPath);
     } catch (signErr) {
-      console.warn(`[FFmpeg Engine] Storage URL signing failed for stream ${streamId}: ${signErr.message`});
+      console.warn('[FFmpeg Engine] Storage URL signing failed for stream ' + streamId + ': ' + signErr.message);
     }
     inputSource = signedUrl || getPublicStorageUrl(cleanPath);
     if (signedUrl) {
@@ -226,7 +227,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
     }
     }
-  } else if (typeof videoUrl === 'string' && /^https?:\/\//i.test(videoUrl)) {
+  } else if (typeof videoUrl === 'string' && /^https?:\\/\\//i.test(videoUrl)) {
     try {
       const parsedUrl = new URL(videoUrl);
       const r2Provider = getStorageProvider('r2');
@@ -235,8 +236,8 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         endpoint: r2Provider.endpoint,
         publicDomain: r2Provider.publicDomain,
       });
-      const pathname = decodeURIComponent(parsedUrl.pathname.replace(/^\/+/, ''));
-      const supabaseStorageMatch = pathname.match(/^storage\/v1\/object\/(?:public|sign|authenticated)\/[^/]+\/(.+)$/);
+      const pathname = decodeURIComponent(parsedUrl.pathname.replace(/^\\/+/, ''));
+      const supabaseStorageMatch = pathname.match(/^storage\\/v1\\/object\\/(?:public|sign|authenticated)\\/[^/]+\\/(.+)$/);
       const isSupabaseStorageUrl = parsedUrl.hostname.includes('supabase.co') && Boolean(supabaseStorageMatch);
       if (r2Object || isSupabaseStorageUrl) {
         const isR2Url = Boolean(r2Object);
@@ -572,9 +573,9 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           console.warn("[FFmpeg Diagnostic] Stream " + streamId + ": " + diagnostic);
         }
         const now = Date.now();
-        const bitrateMatch = raw.match(/bitrate=\s*([0-9.]+kbits\/s)/);
-        const fpsMatch = raw.match(/fps=\s*([0-9.]+)/);
-        const dropMatch = raw.match(/drop=\s*([0-9]+)/);
+        const bitrateMatch = raw.match(/bitrate=\\s*([0-9.]+kbits\\/s)/);
+        const fpsMatch = raw.match(/fps=\\s*([0-9.]+)/);
+        const dropMatch = raw.match(/drop=\\s*([0-9]+)/);
 
         if (now - lastTelemetryUpdate > 2000) {
           lastTelemetryUpdate = now;
@@ -648,7 +649,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
                   timestamp: new Date().toISOString(),
                 }));
               } catch (pubErr) {
-                console.warn(`[Redis Notice] Failed publishing live for ${streamId}:`, pubErr.message);
+                console.warn('[Redis Notice] Failed publishing live for ' + streamId + ':', pubErr.message);
               }
             }
           } else if (!rtmpConfirmed) {
@@ -678,8 +679,8 @@ async function launchFfmpegStream(job, lease, abortSignal) {
 
       currentChild.on('error', (err) => {
         const safeError = sanitizeChildProcessError(err, { secrets: sensitiveValues });
-        const errorMsg = `FFmpeg child process error: ${safeError}`;
-        console.error(`[FFmpeg Child Error] Stream ${streamId}: ${errorMsg}`);
+        const errorMsg = 'FFmpeg child process error: ' + safeError;
+        console.error('[FFmpeg Child Error] Stream ' + streamId + ': ' + errorMsg);
         // Clear 'starting' state and mark as failed
         try {
           void updateOwnedStream({
@@ -1068,14 +1069,14 @@ export const streamWorker = new Worker(
   }
 );
 
-console.log(`[BullMQ Worker] Listening on "${QUEUE_NAME}" with active concurrency: ${currentConcurrency} (Max Cap: ${MAX_CONCURRENT_STREAMS})`);
+console.log('[BullMQ Worker] Listening on "' + QUEUE_NAME + '" with active concurrency: ' + currentConcurrency + ' (Max Cap: ' + MAX_CONCURRENT_STREAMS + ')');
 
 streamWorker.on('completed', (job) => {
-  console.log(`[BullMQ Job] Job ${job.id} completed. Active: ${activeStreams.size}/${MAX_CONCURRENT_STREAMS}`);
+  console.log('[BullMQ Job] Job ' + job.id + ' completed. Active: ' + activeStreams.size + '/' + MAX_CONCURRENT_STREAMS);
 });
 
 streamWorker.on('failed', (job, err) => {
-  console.error(`[BullMQ Job] Job ${job?.id} failed:`, err?.message);
+  console.error('[BullMQ Job] Job ' + job?.id + ' failed:', err?.message);
 });
 
 // ----------------------------------------------------------------------------
@@ -1114,7 +1115,7 @@ const watchdogTimer = setInterval(async () => {
 
   // 3. Memory Watchdog (Guard against container OOM kill)
   if (rssMb > MEMORY_CEILING_MB) {
-    console.warn(`[Memory Watchdog CRITICAL] Worker RSS memory (${rssMb}MB) approached ceiling (${MEMORY_CEILING_MB}MB). Initiating graceful worker cycling...`);
+    console.warn('[Memory Watchdog CRITICAL] Worker RSS memory (' + rssMb + 'MB) approached ceiling (' + MEMORY_CEILING_MB + 'MB). Initiating graceful worker cycling...');
     clearInterval(watchdogTimer);
     await shutdownWorker('MEMORY_CEILING_GUARD');
   }
@@ -1162,7 +1163,7 @@ subClient.on('message', async (channel, message) => {
 // 7. Graceful Host Shutdown Handler
 // ----------------------------------------------------------------------------
 async function shutdownWorker(signal) {
-  console.log(`\n[Shutdown] Received ${signal}. Gracefully stopping all ${activeStreams.size} active streams...`);
+  console.log(`\\n[Shutdown] Received ${signal}. Gracefully stopping all ${activeStreams.size} active streams...`);
 
   clearInterval(watchdogTimer);
   try {
@@ -1263,7 +1264,7 @@ async function resetStuckStreams() {
         s.last_error = null;
         s.updated_at = new Date().toISOString();
         await writeStreams(streams);
-        console.log(`[Boot] Reset stream ${s.id} from '${s.status}' to 'idle'`);
+        console.log('[Boot] Reset stream ${s.id} from '' + s.status + '' to 'idle'');
       }
     }
   } catch (err) {
