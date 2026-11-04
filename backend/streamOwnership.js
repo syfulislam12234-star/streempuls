@@ -111,17 +111,22 @@ export async function claimStreamOwnership(database, {
     return false;
   }
 
+  // Fenced atomic claim: only update if the row still matches the ownership
+  // state we observed. If another worker claimed it between our SELECT and this
+  // UPDATE, the WHERE clause matches no rows and we do not become the owner.
   let query = database
     .from('streams')
     .update({ ...updates, worker_node_id: token })
     .eq('id', streamId);
+  if (currentToken) {
+    query = query.eq('worker_node_id', currentToken);
+  } else {
+    query = query.is('worker_node_id', null);
+  }
 
   // Compare the value that was read. This is the fencing step: if another
   // caller wins between SELECT and UPDATE, this conditional update affects no
   // rows and the caller must not launch or continue FFmpeg.
-  query = currentToken
-    ? query.eq('worker_node_id', currentToken)
-    : query.is('worker_node_id', null);
   if (current.status === null || current.status === undefined) query = query.is('status', null);
   else query = query.eq('status', current.status);
 

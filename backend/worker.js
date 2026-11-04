@@ -286,6 +286,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
     const recentFfmpegDiagnostics = [];
     let leaseLostError = null;
     let leaseLossHandled = false;
+    let heartbeatTimer = null;
     const handleAbort = () => { void streamController.stop('Start cancelled before broadcast'); };
     const updateOwnedStream = (updates, release = false) => updateStreamWhenOwned(supabase, {
       streamId,
@@ -310,6 +311,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       stop: async (reason = 'User requested stop') => {
         isTerminated = true;
         streamController.isIntentionalStop = true;
+        if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
         if (reconnectTimeout) {
           clearTimeout(reconnectTimeout);
           reconnectTimeout = null;
@@ -343,6 +345,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       leaseLossHandled = true;
       leaseLostError = error || new Error('Distributed stream lock was lost.');
       isTerminated = true;
+      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
       streamController.isIntentionalStop = true;
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       await terminateFfmpegChild(currentChild);
@@ -529,6 +532,28 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         return;
       }
 
+      // Independent heartbeat: keep last_heartbeat fresh in Supabase even when
+      // FFmpeg stderr is silent, so a stale owner cannot steal the stream.
+      const HEARTBEAT_INTERVAL_MS = 5000;
+      const refreshHeartbeat = async () => {
+        if (isTerminated || streamController.isIntentionalStop) return;
+        try {
+          const stillOwned = await updateOwnedStream({
+            last_heartbeat: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          });
+          if (!stillOwned) {
+            await handleLeaseLoss(new Error('Distributed stream ownership was lost during heartbeat.'));
+          }
+        } catch {
+          // Transient DB error: do NOT kill the stream. The Redis lease is still
+          // held; retry on the next tick. Repeated failures will surface via
+          // Redis lease renewal rather than an immediate FFmpeg stop.
+        }
+      };
+      refreshHeartbeat();
+      heartbeatTimer = setInterval(refreshHeartbeat, HEARTBEAT_INTERVAL_MS);
+
       // Track whether RTMP connection has been confirmed via first telemetry.
       let rtmpConfirmed = false;
 
@@ -643,7 +668,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
             });
             if (!stillOwned) await handleLeaseLoss(new Error('Distributed stream ownership was lost during heartbeat.'));
           } catch {
-            await handleLeaseLoss(new Error('Distributed stream ownership could not be verified during heartbeat.'));
+            // Transient DB error: keep streaming; Redis lease is still valid.
           }
         }
       });
@@ -681,6 +706,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
 
       currentChild.on('exit', async (code, signal) => {
         if (leaseLostError) return;
+        if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
         // Always clear the 'starting' state regardless of outcome
         try {
           await updateOwnedStream({
@@ -1195,12 +1221,20 @@ async function releaseStreamLockAndReset(streamId, status = 'idle', errorMsg = n
         await redisClient.del(leaseKey);
       }
     } catch {}
-    // Clear Supabase heartbeat and ownership for the stream
+    // Clear Supabase heartbeat and ownership for the stream (fenced: only this
+    // process's own token can clear the claim, preventing lock theft).
     try {
-      await supabase
+      const fenceToken = streamInstance?.leaseToken || null;
+      let ownershipQuery = supabase
         .from('streams')
         .update({ status, ffmpeg_pid: null, worker_node_id: null, last_heartbeat: null, updated_at: new Date().toISOString() })
         .eq('id', streamId);
+      if (fenceToken) {
+        ownershipQuery = ownershipQuery.eq('worker_node_id', fenceToken);
+      } else {
+        ownershipQuery = ownershipQuery.is('worker_node_id', null);
+      }
+      await ownershipQuery;
     } catch {}
     // Publish telemetry event for dashboard
     try {
