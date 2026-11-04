@@ -298,7 +298,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       release,
     });
 
-  console.log(`[FFmpeg Engine] Preparing stream ${streamId} | Destinations: ${activeDestinations.length}`);
+  console.log("[FFmpeg Engine] Preparing stream " + streamId + " | Destinations: " + activeDestinations.length);
   console.log(`[FFmpeg Engine] Source: ${redactUrlQuery(inputSource)} | Vertical: ${isVertical} | DirectCopy: ${directCopyMode !== false}`);
 
     // Stream Controller registered in activeStreams
