@@ -490,7 +490,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         // Multi-destination tee muxer with onfail=ignore:
         // If one destination drops, other destinations remain streaming uninterrupted.
         const teeOutputString = activeDestinations
-          .map((url) => `[f=flv:onfail=ignore]${url}`)
+          .map((url) => "[f=flv:onfail=ignore]" + url)
           .join('|');
 
         ffmpegArgs.push(
