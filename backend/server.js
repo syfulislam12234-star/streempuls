@@ -10,7 +10,7 @@ import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from
 import { getR2Configuration } from './r2Config.js';
 import { validateStreamConfiguration } from './streamDestinations.js';
 import { ensureStreamRecord, StreamPersistenceError } from './streamPersistence.js';
-import { authenticateBearerToken, createStreamAuthMiddleware, getAccessibleStreams, getAuthorizedStream, isStreamAdmin } from './streamAccess.js';
+import { authenticateBearerToken, createStreamAuthMiddleware, getAccessibleStreams, getAuthorizedStream, isStreamAdmin, upsertUserToSupabase } from './streamAccess.js';
 import { enqueueStreamStart } from './streamStart.js';
 import { supabase } from './supabase.js';
 
@@ -544,7 +544,7 @@ app.get('/api/auth/me', (req, res) => {
   return res.json({ success: true, user: safeUser(user) });
 });
 
-app.post('/api/auth/register', (req, res, next) => {
+app.post('/api/auth/register', async (req, res, next) => {
   try {
     const { email, password, full_name, fullName } = req.body || {};
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
@@ -581,6 +581,14 @@ app.post('/api/auth/register', (req, res, next) => {
       created_at: now,
       updated_at: now,
     };
+
+    if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      try {
+        await upsertUserToSupabase(user);
+      } catch (error) {
+        return res.status(503).json({ success: false, error: error.message });
+      }
+    }
 
     users.unshift(user);
     writeUsers(users);

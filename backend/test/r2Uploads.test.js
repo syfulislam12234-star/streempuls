@@ -132,6 +132,8 @@ test('direct R2 upload, confirmation, private preview, and per-user asset isolat
       DATA_DIR: tempDir,
       NODE_ENV: 'test',
       CORS_ORIGINS: 'http://127.0.0.1',
+      SUPABASE_URL: '',
+      SUPABASE_SERVICE_ROLE_KEY: '',
       CLOUDFLARE_R2_ACCOUNT_ID: '0123456789abcdef0123456789abcdef',
       CLOUDFLARE_R2_ENDPOINT: `http://127.0.0.1:${r2Port}`,
       CLOUDFLARE_R2_ACCESS_KEY_ID: 'test-access-key',
@@ -160,6 +162,12 @@ test('direct R2 upload, confirmation, private preview, and per-user asset isolat
   assert.equal(otherLogin.status, 200);
   const ownerToken = (await ownerLogin.json()).token;
   const otherToken = (await otherLogin.json()).token;
+
+  const connectionTestResponse = await postJson(baseUrl, '/api/streams/test-connection', {
+    rtmpServerUrl: 'rtmp://a.rtmp.youtube.com/live2',
+    streamKey: 'owner-test-key',
+  }, ownerToken);
+  assert.equal(connectionTestResponse.status, 200, 'the stored Bearer session must authenticate Test Connection');
 
   const anonymousSession = await fetch(`${baseUrl}/api/auth/me`);
   assert.equal(anonymousSession.status, 401, 'an anonymous request must not be assigned the first user');

@@ -1,20 +1,52 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { supabase } from './supabase.js';
+
+const USERS_FILE = path.join(
+  process.env.DATA_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data'),
+  'users.json',
+);
+
+function readLocalUsers() {
+  try {
+    const users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+    return Array.isArray(users) ? users : [];
+  } catch {
+    return [];
+  }
+}
 
 /** Fetch all users from Supabase users table for authentication. */
 export async function fetchUsersFromSupabase() {
+  let databaseUsers = [];
   try {
     const { data, error } = await supabase.from('users').select('*');
     if (error) {
       console.warn('[Supabase] Failed to fetch users:', error.message);
-      return [];
+    } else if (Array.isArray(data)) {
+      databaseUsers = data;
     }
-    return data || [];
   } catch (err) {
     console.warn('[Supabase] Error fetching users:', err.message);
-    return [];
   }
-};
+
+  // The backend's current signup flow also persists locally. Merge that source
+  // so sessions remain usable during DB outages and before older users sync.
+  const usersById = new Map(databaseUsers.map((user) => [user.id, user]));
+  for (const user of readLocalUsers()) usersById.set(user.id, { ...usersById.get(user.id), ...user });
+  return [...usersById.values()];
+}
+
+/** Persist this app's custom-auth user record for API/worker authentication. */
+export async function upsertUserToSupabase(user, database = supabase) {
+  const { error } = await database.from('users').upsert(user, { onConflict: 'id' });
+  if (error) {
+    console.error('[Supabase] Failed to persist new user:', error.message);
+    throw new Error('Unable to save the account profile to Supabase. Please try again later.');
+  }
+}
 
 /** Resolve a Bearer token against Supabase user data. */
 export function authenticateBearerToken(authorization, users) {

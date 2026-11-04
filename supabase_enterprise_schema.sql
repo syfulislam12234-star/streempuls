@@ -45,6 +45,42 @@ CREATE INDEX IF NOT EXISTS idx_profiles_sub_status ON public.profiles(subscripti
 CREATE INDEX IF NOT EXISTS idx_profiles_expires_at ON public.profiles(expires_at);
 
 -- ----------------------------------------------------------------------------
+-- 1b. USERS TABLE
+-- The API currently issues its own Bearer sessions rather than calling
+-- supabase.auth.signUp(). Keep the account/token hashes in this service-role
+-- managed table so stream authentication can resolve newly registered users.
+-- Never store the submitted plaintext password.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.users (
+  id TEXT PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  full_name TEXT,
+  role VARCHAR(20) DEFAULT 'user' NOT NULL,
+  subscription_tier VARCHAR(20) DEFAULT 'free' NOT NULL,
+  subscription_status VARCHAR(20) DEFAULT 'unpaid' NOT NULL,
+  channel_limit INT DEFAULT 1 NOT NULL,
+  video_limit INT DEFAULT 1 NOT NULL,
+  duration_days INT DEFAULT 3 NOT NULL,
+  hour_limit INT DEFAULT 10 NOT NULL,
+  has_watermark BOOLEAN DEFAULT TRUE NOT NULL,
+  is_brand_free BOOLEAN DEFAULT FALSE NOT NULL,
+  price_bdt NUMERIC(10, 2) DEFAULT 0 NOT NULL,
+  password_hash TEXT NOT NULL,
+  password_salt TEXT NOT NULL,
+  auth_token_hash TEXT NOT NULL,
+  expires_at TIMESTAMPTZ,
+  referral_code VARCHAR(30),
+  reward_credits_bdt NUMERIC(10, 2) DEFAULT 0 NOT NULL,
+  trial_days_bonus INT DEFAULT 0 NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.users FROM anon, authenticated;
+GRANT ALL ON TABLE public.users TO service_role;
+
+-- ----------------------------------------------------------------------------
 -- 2. USER REFERRALS TABLE
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.user_referrals (

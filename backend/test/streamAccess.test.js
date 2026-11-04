@@ -8,6 +8,7 @@ import {
   getAccessibleStreams,
   getAuthorizedStream,
   isStreamAdmin,
+  upsertUserToSupabase,
 } from '../streamAccess.js';
 
 const token = 'unit-test-session-token';
@@ -82,4 +83,48 @@ test('a caller-supplied admin role without a valid token does not authorize acce
   const forgedAdmin = { id: 'attacker', role: 'admin' };
   assert.equal(authenticateBearerToken(undefined, [forgedAdmin]), null);
   assert.equal(canAccessStream(null, otherStream), false);
+});
+
+test('new custom-auth users are upserted into public.users with conflict handling by id', async () => {
+  let insertedTable;
+  let insertedUser;
+  let options;
+  const database = {
+    from(table) {
+      insertedTable = table;
+      return {
+        async upsert(user, upsertOptions) {
+          insertedUser = user;
+          options = upsertOptions;
+          return { error: null };
+        },
+      };
+    },
+  };
+  const user = {
+    id: 'new-user',
+    email: 'new@example.test',
+    password_hash: 'one-way-password-hash',
+    password_salt: 'salt',
+    auth_token_hash: 'one-way-token-hash',
+  };
+
+  await upsertUserToSupabase(user, database);
+
+  assert.equal(insertedTable, 'users');
+  assert.equal(insertedUser, user);
+  assert.deepEqual(options, { onConflict: 'id' });
+});
+
+test('Supabase user sync failures are not swallowed', async () => {
+  const database = {
+    from() {
+      return { async upsert() { return { error: { message: 'users table unavailable' } }; } };
+    },
+  };
+
+  await assert.rejects(
+    upsertUserToSupabase({ id: 'new-user' }, database),
+    /Unable to save the account profile to Supabase/,
+  );
 });

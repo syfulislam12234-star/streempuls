@@ -784,27 +784,21 @@ export const apiClient = {
 
   // 10b. Safe destination connection test
   async testConnection(rtmpServerUrl: string, streamKey: string): Promise<{ success: boolean; message: string }> {
-    try {
-      const res = await fetch('/api/streams/test-connection', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ rtmpServerUrl, streamKey }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Connection check failed');
-      }
-      return { success: true, message: data.message };
-    } catch (err: any) {
-      if (err?.message === 'Authentication required.') throw err;
-      if (!streamKey.trim()) {
-        throw new Error('Please enter your stream key before testing.');
-      }
-      return {
-        success: true,
-        message: 'Destination ready! Verified streaming address.',
-      };
+    const token = getStoredAuthToken();
+    if (!token) throw new Error('Authentication required. Please sign in again.');
+
+    const headers = getAuthHeaders();
+    headers.Authorization = `Bearer ${token}`;
+    const res = await fetch('/api/streams/test-connection', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ rtmpServerUrl, streamKey }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Connection check failed');
     }
+    return { success: true, message: data.message };
   },
 
   // 11. Modular Storage Provider status & readiness
