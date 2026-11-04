@@ -299,7 +299,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
     });
 
   console.log("[FFmpeg Engine] Preparing stream " + streamId + " | Destinations: " + activeDestinations.length);
-  console.log(`[FFmpeg Engine] Source: ${redactUrlQuery(inputSource)} | Vertical: ${isVertical} | DirectCopy: ${directCopyMode !== false}`);
+  console.log("[FFmpeg Engine] Source: " + redactUrlQuery(inputSource) + " | Vertical: " + isVertical + " | DirectCopy: " + (directCopyMode !== false));
 
     // Stream Controller registered in activeStreams
     const streamController = {
@@ -334,7 +334,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           return false;
         }
 
-        console.log(`[Process Tracker] Stream ${streamId} cleanly stopped (${reason}). Active: ${activeStreams.size}/${MAX_CONCURRENT_STREAMS}`);
+        console.log("[Process Tracker] Stream " + streamId + " cleanly stopped ( " + reason + " ). Active: " + activeStreams.size + " / " + MAX_CONCURRENT_STREAMS);
         if (leaseLostError) reject(new Error('Distributed stream lock was lost; FFmpeg was stopped.'));
         else resolve(true);
       },
@@ -405,7 +405,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         return;
       }
 
-      console.log(`[FFmpeg Spawn] Starting 24/7 stream: ${streamId} (Attempt ${reconnectAttempts + 1}/${MAX_RESTART_RETRIES + 1})`);
+      console.log("[FFmpeg Spawn] Starting 24/7 stream: " + streamId + " (Attempt " + (reconnectAttempts + 1) + "/" + (MAX_RESTART_RETRIES + 1) + ")");
 
       // ------------------------------------------------------------------------
       // Zero-Lag & Low-Latency Stream Optimization Parameters
@@ -511,7 +511,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         return;
       }
 
-      console.log(`[FFmpeg Spawn] Stream ${streamId} active with PID ${pid} (Attempts used: ${reconnectAttempts}/${MAX_RESTART_RETRIES})`);
+      console.log("[FFmpeg Spawn] Stream " + streamId + " active with PID " + pid + " (Attempts used: " + reconnectAttempts + "/" + MAX_RESTART_RETRIES + ")");
 
       // FFmpeg process spawned — but we do NOT mark 'live' yet.
       // Status becomes 'live' only after the first telemetry (bitrate/fps) confirms
@@ -569,7 +569,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           if (recentFfmpegDiagnostics.at(-1) === diagnostic) continue;
           recentFfmpegDiagnostics.push(diagnostic);
           if (recentFfmpegDiagnostics.length > MAX_FFMPEG_DIAGNOSTICS) recentFfmpegDiagnostics.shift();
-          console.warn(`[FFmpeg Diagnostic] Stream ${streamId}: ${diagnostic}`);
+          console.warn("[FFmpeg Diagnostic] Stream " + streamId + ": " + diagnostic);
         }
         const now = Date.now();
         const bitrateMatch = raw.match(/bitrate=\s*([0-9.]+kbits\/s)/);
