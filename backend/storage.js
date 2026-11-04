@@ -158,7 +158,15 @@ export class CloudflareR2StorageAdapter {
     await this.ensureInitialized();
     const cleanPath = fileName.replace(/^\/+/, '');
     if (!this.s3Client) {
-      throw new Error('Cloudflare R2 S3 client not initialized. Check credentials and configuration.');
+      throw new Error(
+        'Cloudflare R2 S3 client not initialized. Check credentials and configuration.' +
+        ' AccountId=' + (this.accountId ? 'set' : 'missing') +
+        ', AccessKeyId=' + (this.accessKeyId ? 'set' : 'missing') +
+        ', SecretKey=' + (this.secretAccessKey ? 'set' : 'missing') +
+        ', Endpoint=' + (this.endpoint || 'missing') +
+        ', Bucket=' + this.bucket +
+        '.'
+      );
     }
     try {
       const { GetObjectCommand } = await import('@aws-sdk/client-s3');
@@ -166,7 +174,7 @@ export class CloudflareR2StorageAdapter {
       const command = new GetObjectCommand({ Bucket: this.bucket, Key: cleanPath });
       return await getSignedUrl(this.s3Client, command, { expiresIn: expiresInSeconds });
     } catch (err) {
-      throw new Error('Cloudflare R2 signing failed for the configured object.');
+      throw new Error(`Cloudflare R2 signing failed for object '${cleanPath}': ${err.message}`);
     }
   }
 
@@ -174,7 +182,15 @@ export class CloudflareR2StorageAdapter {
     await this.ensureInitialized();
     const cleanPath = fileName.replace(/^\/+/, '');
     if (!this.s3Client) {
-      throw new Error('Cloudflare R2 S3 client not initialized. Check credentials and configuration.');
+      throw new Error(
+        'Cloudflare R2 S3 client not initialized. Check credentials and configuration.' +
+        ' AccountId=' + (this.accountId ? 'set' : 'missing') +
+        ', AccessKeyId=' + (this.accessKeyId ? 'set' : 'missing') +
+        ', SecretKey=' + (this.secretAccessKey ? 'set' : 'missing') +
+        ', Endpoint=' + (this.endpoint || 'missing') +
+        ', Bucket=' + this.bucket +
+        '.'
+      );
     }
     try {
       const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
@@ -254,3 +270,4 @@ export function getPublicStorageUrl(fileName) {
 export async function getSignedStorageUrl(fileName, expiresInSeconds = 86400) {
   return storageProvider.getSignedUrl(fileName, expiresInSeconds);
 }
+
