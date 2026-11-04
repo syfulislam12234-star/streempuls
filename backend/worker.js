@@ -252,7 +252,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         }
       }
     } catch (signErr) {
-      console.warn(`[FFmpeg Engine] Storage URL signing failed for stream ${streamId}: ${signErr.message}`);
+      console.warn("[FFmpeg Engine] Storage URL signing failed for stream " + streamId + ": " + signErr.message);
     }
   }
 
