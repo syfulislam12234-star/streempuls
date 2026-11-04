@@ -112,8 +112,21 @@ test('new custom-auth users are upserted into public.users with conflict handlin
   await upsertUserToSupabase(user, database);
 
   assert.equal(insertedTable, 'users');
-  assert.equal(insertedUser, user);
+  assert.deepEqual(insertedUser, user);
   assert.deepEqual(options, { onConflict: 'id' });
+});
+
+test('user upsert excludes fields outside the public.users schema', async () => {
+  let insertedUser;
+  const database = {
+    from() {
+      return { async upsert(user) { insertedUser = user; return { error: null }; } };
+    },
+  };
+
+  await upsertUserToSupabase({ id: 'new-user', email: 'new@example.test', password: 'must-not-be-persisted', clientOnly: true }, database);
+
+  assert.deepEqual(insertedUser, { id: 'new-user', email: 'new@example.test' });
 });
 
 test('Supabase user sync failures are not swallowed', async () => {
@@ -123,8 +136,22 @@ test('Supabase user sync failures are not swallowed', async () => {
     },
   };
 
-  await assert.rejects(
-    upsertUserToSupabase({ id: 'new-user' }, database),
-    /Unable to save the account profile to Supabase/,
-  );
+  const originalError = console.error;
+  const logged = [];
+  console.error = (...args) => logged.push(args);
+  try {
+    await assert.rejects(
+      upsertUserToSupabase({ id: 'new-user' }, database),
+      /Unable to save the account profile to Supabase/,
+    );
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(logged[0][0], '[Supabase] Failed to persist new user:');
+  assert.deepEqual(logged[0][1], {
+    code: null,
+    message: 'users table unavailable',
+    details: null,
+    hint: null,
+  });
 });

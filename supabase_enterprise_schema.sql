@@ -76,6 +76,56 @@ CREATE TABLE IF NOT EXISTS public.users (
   updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
 );
 
+-- Upgrade pre-existing users tables in place. The custom-auth API creates its
+-- own account IDs, so public.users.id must not require a matching auth.users
+-- row. Existing UUID columns remain valid because the API IDs are UUIDs.
+ALTER TABLE public.users
+  ADD COLUMN IF NOT EXISTS id TEXT,
+  ADD COLUMN IF NOT EXISTS email TEXT,
+  ADD COLUMN IF NOT EXISTS full_name TEXT,
+  ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'user',
+  ADD COLUMN IF NOT EXISTS subscription_tier VARCHAR(20) DEFAULT 'free',
+  ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(20) DEFAULT 'unpaid',
+  ADD COLUMN IF NOT EXISTS channel_limit INT DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS video_limit INT DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS duration_days INT DEFAULT 3,
+  ADD COLUMN IF NOT EXISTS hour_limit INT DEFAULT 10,
+  ADD COLUMN IF NOT EXISTS has_watermark BOOLEAN DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS is_brand_free BOOLEAN DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS price_bdt NUMERIC(10, 2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS password_hash TEXT,
+  ADD COLUMN IF NOT EXISTS password_salt TEXT,
+  ADD COLUMN IF NOT EXISTS auth_token_hash TEXT,
+  ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS referral_code VARCHAR(30),
+  ADD COLUMN IF NOT EXISTS reward_credits_bdt NUMERIC(10, 2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS trial_days_bonus INT DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+
+DO $$
+DECLARE
+  id_attnum SMALLINT;
+  fk RECORD;
+BEGIN
+  SELECT attnum INTO id_attnum
+  FROM pg_attribute
+  WHERE attrelid = 'public.users'::regclass AND attname = 'id' AND NOT attisdropped;
+
+  FOR fk IN
+    SELECT conname
+    FROM pg_constraint
+    WHERE conrelid = 'public.users'::regclass
+      AND contype = 'f'
+      AND confrelid = 'auth.users'::regclass
+      AND conkey @> ARRAY[id_attnum]
+  LOOP
+    EXECUTE format('ALTER TABLE public.users DROP CONSTRAINT %I', fk.conname);
+  END LOOP;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS users_id_upsert_uidx ON public.users(id);
+
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.users FROM anon, authenticated;
 GRANT ALL ON TABLE public.users TO service_role;

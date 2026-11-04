@@ -41,10 +41,29 @@ export async function fetchUsersFromSupabase() {
 
 /** Persist this app's custom-auth user record for API/worker authentication. */
 export async function upsertUserToSupabase(user, database = supabase) {
-  const { error } = await database.from('users').upsert(user, { onConflict: 'id' });
-  if (error) {
-    console.error('[Supabase] Failed to persist new user:', error.message);
-    throw new Error('Unable to save the account profile to Supabase. Please try again later.');
+  const columns = [
+    'id', 'email', 'full_name', 'role', 'subscription_tier', 'subscription_status',
+    'channel_limit', 'video_limit', 'duration_days', 'hour_limit', 'has_watermark',
+    'is_brand_free', 'price_bdt', 'password_hash', 'password_salt', 'auth_token_hash',
+    'expires_at', 'referral_code', 'reward_credits_bdt', 'trial_days_bonus', 'created_at', 'updated_at',
+  ];
+  const payload = Object.fromEntries(columns
+    .filter((column) => user?.[column] !== undefined)
+    .map((column) => [column, user[column]]));
+
+  try {
+    const { error } = await database.from('users').upsert(payload, { onConflict: 'id' });
+    if (error) throw error;
+  } catch (error) {
+    // Keep the database's full diagnostic in server logs, but don't expose
+    // schema details, query text, or credentials in the registration response.
+    console.error('[Supabase] Failed to persist new user:', {
+      code: error?.code || null,
+      message: error?.message || String(error),
+      details: error?.details || null,
+      hint: error?.hint || null,
+    });
+    throw new Error('Unable to save the account profile to Supabase. Please try again later.', { cause: error });
   }
 }
 
