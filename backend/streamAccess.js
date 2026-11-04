@@ -23,7 +23,7 @@ export function authenticateBearerToken(authorization, users) {
     : null;
   if (!match) return null;
 
-  const presentedHash = tokenHash(match[1]);
+  const presentedHash = createHash('sha256').update(match[1]).digest();
   return (Array.isArray(users) ? users : []).find((user) => {
     if (typeof user?.auth_token_hash !== 'string' || !/^[a-f\d]{64}$/i.test(user.auth_token_hash)) return false;
     return timingSafeEqual(presentedHash, Buffer.from(user.auth_token_hash, 'hex'));
@@ -50,13 +50,23 @@ export function getAccessibleStreams(user, streams) {
 };
 
 /** Express middleware factory, injectable for tests without starting the API listener. */
-export function createStreamAuthMiddleware() {
-  return async (req, res, next) => {
-    const users = await fetchUsersFromSupabase();
-    const user = authenticateBearerToken(req.get('authorization'), users);
-    if (!user) return res.status(401).json({ success: false, error: 'Authentication required.' });
-    req.streamUser = user;
-    return next();
+export function createStreamAuthMiddleware(getUsers = fetchUsersFromSupabase) {
+  return (req, res, next) => {
+    const authenticate = (users) => {
+      const user = authenticateBearerToken(req.get('authorization'), users);
+      if (!user) return res.status(401).json({ success: false, error: 'Authentication required.' });
+      req.streamUser = user;
+      return next();
+    };
+
+    try {
+      const users = getUsers();
+      return users && typeof users.then === 'function'
+        ? users.then(authenticate).catch(next)
+        : authenticate(users);
+    } catch (error) {
+      return next(error);
+    }
   };
 };
 

@@ -209,7 +209,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       const r2Provider = STORAGE_PROVIDER === 'r2' ? getStorageProvider('r2') : null;
     const cleanPath = r2Provider
       ? normalizeR2ObjectKey(videoUrl, r2Provider.bucket)
-      : videoUrl.replace(/^(stream-assets|live-stream-assets)\\//, '').replace(/^\\/+/, '');
+      : videoUrl.replace(/^(stream-assets|live-stream-assets)\//, '').replace(/^\/+/, '');
     if (r2Provider) await r2Provider.headObject(cleanPath);
     let signedUrl = null;
     try {
@@ -227,7 +227,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
     }
     }
-  } else if (typeof videoUrl === 'string' && /^https?:\\/\\//i.test(videoUrl)) {
+  } else if (typeof videoUrl === 'string' && /^https?:\/\//i.test(videoUrl)) {
     try {
       const parsedUrl = new URL(videoUrl);
       const r2Provider = getStorageProvider('r2');
@@ -236,8 +236,8 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         endpoint: r2Provider.endpoint,
         publicDomain: r2Provider.publicDomain,
       });
-      const pathname = decodeURIComponent(parsedUrl.pathname.replace(/^\\/+/, ''));
-      const supabaseStorageMatch = pathname.match(/^storage\\/v1\\/object\\/(?:public|sign|authenticated)\\/[^/]+\\/(.+)$/);
+      const pathname = decodeURIComponent(parsedUrl.pathname.replace(/^\/+/, ''));
+      const supabaseStorageMatch = pathname.match(/^storage\/v1\/object\/(?:public|sign|authenticated)\/[^/]+\/(.+)$/);
       const isSupabaseStorageUrl = parsedUrl.hostname.includes('supabase.co') && Boolean(supabaseStorageMatch);
       if (r2Object || isSupabaseStorageUrl) {
         const isR2Url = Boolean(r2Object);
@@ -573,9 +573,9 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           console.warn("[FFmpeg Diagnostic] Stream " + streamId + ": " + diagnostic);
         }
         const now = Date.now();
-        const bitrateMatch = raw.match(/bitrate=\\s*([0-9.]+kbits\\/s)/);
-        const fpsMatch = raw.match(/fps=\\s*([0-9.]+)/);
-        const dropMatch = raw.match(/drop=\\s*([0-9]+)/);
+        const bitrateMatch = raw.match(/bitrate=\s*([0-9.]+kbits\/s)/);
+        const fpsMatch = raw.match(/fps=\s*([0-9.]+)/);
+        const dropMatch = raw.match(/drop=\s*([0-9]+)/);
 
         if (now - lastTelemetryUpdate > 2000) {
           lastTelemetryUpdate = now;
@@ -1264,7 +1264,7 @@ async function resetStuckStreams() {
         s.last_error = null;
         s.updated_at = new Date().toISOString();
         await writeStreams(streams);
-        console.log('[Boot] Reset stream ${s.id} from '' + s.status + '' to 'idle'');
+        console.log(`[Boot] Reset stream ${s.id} to 'idle'`);
       }
     }
   } catch (err) {

@@ -137,18 +137,10 @@ function getR2CorsOrigins() {
 }
 
 function readUsers() {
-  // Users fetched centrally from Supabase via streamAccess.fetchUsersFromSupabase()
-  // Kept for backward compatibility with server-side code
-  try {
-    const { data, error } = await supabase.from('users').select('*');
-    if (error) {
-      console.warn('[Supabase] Failed to fetch users:', error.message);
-      return [];
-    }
-    return data || [];
-  } catch {
-    return [];
-  }
+  // Keep this accessor synchronous: authentication and route handlers use it
+  // inline. Stream-access code performs Supabase reads through its async API.
+  const users = readJsonFile(USERS_FILE, []);
+  return Array.isArray(users) ? users : [];
 }
 
 function writeUsers(users) {
