@@ -120,13 +120,15 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2.0'
+          cpus: '1.5'
           memory: 2048M
         reservations:
           cpus: '0.5'
           memory: 512M
     environment:
       - NODE_ENV=production
+      - STREAM_TIER=free
+      - USERS_PER_CONTAINER=10
       - QUEUE_NAME=streaming-queue
       - REDIS_HOST=redis
       - REDIS_PORT=6379

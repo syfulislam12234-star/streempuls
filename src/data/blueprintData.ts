@@ -45,13 +45,15 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '6.0'
-          memory: 8192M
-        reservations:
-          cpus: '1.0'
+          cpus: '1.5'
           memory: 2048M
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     environment:
       - WORKER_NODE_ID=hetzner-node-01
+      - STREAM_TIER=free
+      - USERS_PER_CONTAINER=10
       - SUPABASE_URL=\${SUPABASE_URL}
       - SUPABASE_SERVICE_ROLE_KEY=\${SUPABASE_SERVICE_ROLE_KEY}
       - REDIS_HOST=redis

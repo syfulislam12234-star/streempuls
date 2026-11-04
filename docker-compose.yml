@@ -130,6 +130,8 @@ services:
       - CLOUDFLARE_R2_BUCKET_NAME=${CLOUDFLARE_R2_BUCKET_NAME:-stream-assets}
       - CLOUDFLARE_R2_BUCKET=${CLOUDFLARE_R2_BUCKET:-stream-assets}
       - CLOUDFLARE_R2_PUBLIC_DOMAIN=${CLOUDFLARE_R2_PUBLIC_DOMAIN:-}
+      - STREAM_TIER=free
+      - USERS_PER_CONTAINER=10
     depends_on:
       redis:
         condition: service_healthy
@@ -144,7 +146,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2.0'
+          cpus: '1.5'
           memory: 2048M
         reservations:
           cpus: '0.5'
