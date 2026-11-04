@@ -137,9 +137,15 @@ function getR2CorsOrigins() {
 }
 
 function readUsers() {
+  // Users fetched centrally from Supabase via streamAccess.fetchUsersFromSupabase()
+  // Kept for backward compatibility with server-side code
   try {
-    const users = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
-    return Array.isArray(users) ? users : [];
+    const { data, error } = await supabase.from('users').select('*');
+    if (error) {
+      console.warn('[Supabase] Failed to fetch users:', error.message);
+      return [];
+    }
+    return data || [];
   } catch {
     return [];
   }
@@ -212,7 +218,7 @@ function getAuthenticatedUser(req) {
   return authenticateBearerToken(req.get('authorization'), readUsers());
 }
 
-const requireStreamAuthentication = createStreamAuthMiddleware(readUsers);
+const requireStreamAuthentication = createStreamAuthMiddleware();
 
 function readUploadedAssets() {
   const assets = readJsonFile(UPLOADED_ASSETS_FILE, []);
