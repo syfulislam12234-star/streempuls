@@ -116,6 +116,22 @@ test('new custom-auth users are upserted into public.users with conflict handlin
   assert.deepEqual(options, { onConflict: 'id' });
 });
 
+test('user upsert rejects incomplete identity and credential payloads before database access', async () => {
+  let databaseCalled = false;
+  const database = {
+    from() {
+      databaseCalled = true;
+      throw new Error('database must not be called for invalid payload');
+    },
+  };
+
+  await assert.rejects(
+    upsertUserToSupabase({ id: 'new-user', email: 'new@example.test' }, database),
+    /required fields are missing \(password_hash, password_salt, auth_token_hash\)/,
+  );
+  assert.equal(databaseCalled, false);
+});
+
 test('user upsert excludes fields outside the public.users schema', async () => {
   let insertedUser;
   const database = {
@@ -124,16 +140,43 @@ test('user upsert excludes fields outside the public.users schema', async () => 
     },
   };
 
-  await upsertUserToSupabase({ id: 'new-user', email: 'new@example.test', password: 'must-not-be-persisted', clientOnly: true }, database);
+  await upsertUserToSupabase({
+    id: 'new-user',
+    email: 'new@example.test',
+    password_hash: 'hash',
+    password_salt: 'salt',
+    auth_token_hash: 'token-hash',
+    password: 'must-not-be-persisted',
+    clientOnly: true,
+  }, database);
 
-  assert.deepEqual(insertedUser, { id: 'new-user', email: 'new@example.test' });
+  assert.deepEqual(insertedUser, {
+    id: 'new-user',
+    email: 'new@example.test',
+    password_hash: 'hash',
+    password_salt: 'salt',
+    auth_token_hash: 'token-hash',
+  });
 });
 
 test('Supabase user sync failures are not swallowed', async () => {
+  const supabaseError = {
+    code: '23503',
+    message: 'insert or update violates foreign key constraint',
+    details: 'Key is not present in referenced table.',
+    hint: 'Check the users foreign keys.',
+  };
   const database = {
     from() {
-      return { async upsert() { return { error: { message: 'users table unavailable' } }; } };
+      return { async upsert() { return { error: supabaseError }; } };
     },
+  };
+  const validUser = {
+    id: 'new-user',
+    email: 'new@example.test',
+    password_hash: 'hash',
+    password_salt: 'salt',
+    auth_token_hash: 'token-hash',
   };
 
   const originalError = console.error;
@@ -141,17 +184,12 @@ test('Supabase user sync failures are not swallowed', async () => {
   console.error = (...args) => logged.push(args);
   try {
     await assert.rejects(
-      upsertUserToSupabase({ id: 'new-user' }, database),
+      upsertUserToSupabase(validUser, database),
       /Unable to save the account profile to Supabase/,
     );
   } finally {
     console.error = originalError;
   }
-  assert.equal(logged[0][0], '[Supabase] Failed to persist new user:');
-  assert.deepEqual(logged[0][1], {
-    code: null,
-    message: 'users table unavailable',
-    details: null,
-    hint: null,
-  });
+  assert.equal(logged[0][0], '[Supabase] Failed to persist new user; exact Supabase error object follows:');
+  assert.equal(logged[1][0], supabaseError, 'log the original Supabase error object, not a reduced copy');
 });

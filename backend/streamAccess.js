@@ -41,6 +41,14 @@ export async function fetchUsersFromSupabase() {
 
 /** Persist this app's custom-auth user record for API/worker authentication. */
 export async function upsertUserToSupabase(user, database = supabase) {
+  const requiredFields = ['id', 'email', 'password_hash', 'password_salt', 'auth_token_hash'];
+  const missingFields = requiredFields.filter((field) =>
+    typeof user?.[field] !== 'string' || user[field].trim().length === 0,
+  );
+  if (missingFields.length > 0) {
+    throw new TypeError(`Cannot sync user: required fields are missing (${missingFields.join(', ')}).`);
+  }
+
   const columns = [
     'id', 'email', 'full_name', 'role', 'subscription_tier', 'subscription_status',
     'channel_limit', 'video_limit', 'duration_days', 'hour_limit', 'has_watermark',
@@ -55,14 +63,10 @@ export async function upsertUserToSupabase(user, database = supabase) {
     const { error } = await database.from('users').upsert(payload, { onConflict: 'id' });
     if (error) throw error;
   } catch (error) {
-    // Keep the database's full diagnostic in server logs, but don't expose
-    // schema details, query text, or credentials in the registration response.
-    console.error('[Supabase] Failed to persist new user:', {
-      code: error?.code || null,
-      message: error?.message || String(error),
-      details: error?.details || null,
-      hint: error?.hint || null,
-    });
+    // Log the original PostgREST/PostgreSQL error object intact for diagnosis;
+    // keep the response returned to the browser free of database internals.
+    console.error('[Supabase] Failed to persist new user; exact Supabase error object follows:');
+    console.error(error);
     throw new Error('Unable to save the account profile to Supabase. Please try again later.', { cause: error });
   }
 }

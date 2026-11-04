@@ -566,9 +566,10 @@ app.post('/api/auth/register', async (req, res, next) => {
     const passwordSalt = randomBytes(16).toString('hex');
     const passwordHash = scryptSync(password, passwordSalt, 64).toString('hex');
     const accessToken = randomBytes(32).toString('hex');
+    const userId = randomUUID();
     const tierConfig = getTierConfig('free');
     const user = {
-      id: randomUUID(),
+      id: userId,
       email: normalizedEmail,
       full_name: normalizedName || normalizedEmail.split('@')[0],
       role: 'user',
