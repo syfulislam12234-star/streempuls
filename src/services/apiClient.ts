@@ -880,7 +880,7 @@ export const apiClient = {
   },
 
   // 14. Register a new user (defaults to subscription_status: 'unpaid')
-  async registerUser(payload: { email: string; password?: string; full_name?: string }): Promise<UserProfile> {
+  async registerUser(payload: { email: string; password: string; full_name: string }): Promise<UserProfile> {
     const res = await fetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -892,7 +892,7 @@ export const apiClient = {
   },
 
   // 15. Sign in
-  async loginUser(payload: { email: string; password?: string }): Promise<UserProfile> {
+  async loginUser(payload: { email: string; password: string }): Promise<UserProfile> {
     const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

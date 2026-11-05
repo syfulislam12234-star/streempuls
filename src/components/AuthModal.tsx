@@ -33,7 +33,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [mode, setMode] = useState<'register' | 'login'>('register');
   const [email, setEmail] = useState('');
   const [fullName, setFullName] = useState('');
-  const [password, setPassword] = useState('password123');
+  const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [localShowLegal, setLocalShowLegal] = useState(false);
@@ -68,7 +68,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         user = await apiClient.registerUser({
           email: email.trim(),
           password,
-          full_name: fullName.trim() || undefined,
+          full_name: fullName.trim(),
         });
       } else {
         user = await apiClient.loginUser({
@@ -145,6 +145,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="user@example.com"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:border-red-500 focus:outline-none"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <label htmlFor="auth-password" className="text-xs font-semibold text-slate-300 block">Password *</label>
+            <input
+              id="auth-password"
+              type="password"
+              required
+              minLength={mode === 'register' ? 8 : 1}
+              maxLength={72}
+              autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder={mode === 'register' ? 'At least 8 characters' : 'Enter your password'}
               className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:border-red-500 focus:outline-none"
             />
           </div>

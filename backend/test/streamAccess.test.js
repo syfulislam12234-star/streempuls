@@ -108,6 +108,7 @@ test('new custom-auth users are upserted into public.profiles with conflict hand
     role: 'user',
     subscription_tier: 'business',
     subscription_status: 'unpaid',
+    channel_limit: 4,
     created_at: '2026-01-02T03:04:05.000Z',
     password_hash: 'one-way-password-hash',
     password_salt: 'salt',
@@ -121,6 +122,7 @@ test('new custom-auth users are upserted into public.profiles with conflict hand
   assert.equal(insertedUser.email, user.email);
   assert.equal(insertedUser.created_at, user.created_at);
   assert.equal(insertedUser.subscription_status, 'unpaid');
+  assert.equal(insertedUser.channel_limit, 4);
   assert.equal(insertedUser.full_name, 'new');
   assert.equal(insertedUser.password_hash, user.password_hash);
   assert.equal(insertedUser.auth_token_hash, user.auth_token_hash);
