@@ -35,6 +35,7 @@ import { claimStreamOwnership, updateStreamWhenOwned } from './streamOwnership.j
 import { resolveLocalUpload } from './localVideoSource.js';
 
 dotenv.config();
+const DIRECT_COPY_ENABLED = process.env.DIRECT_COPY_ENABLED !== 'false';
 
 // ----------------------------------------------------------------------------
 // Worker Node Identity & Capacity Configuration
@@ -106,6 +107,111 @@ function redactUrlQuery(value) {
   } catch {
     return value;
   }
+}
+
+function probeDirectCopyEligibility(source) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let output = '';
+    let timeout;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    };
+
+    let probe;
+    try {
+      probe = spawn('ffprobe', [
+        '-v', 'error',
+        '-select_streams', 'v:0',
+        '-read_intervals', '%+10',
+        '-show_packets',
+        '-show_entries', 'stream=codec_name,width,height,r_frame_rate,bit_rate:packet=pts_time,flags',
+        '-of', 'json',
+        source,
+      ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      finish({ eligible: false, reason: 'ffprobe-error' });
+      return;
+    }
+
+    timeout = setTimeout(() => {
+      probe.kill('SIGKILL');
+      finish({ eligible: false, reason: 'ffprobe-timeout' });
+    }, 15000);
+
+    probe.stdout?.on('data', (chunk) => {
+      output += chunk.toString();
+      if (output.length > 5 * 1024 * 1024) {
+        probe.kill('SIGKILL');
+        finish({ eligible: false, reason: 'ffprobe-output-too-large' });
+      }
+    });
+    probe.on('error', () => finish({ eligible: false, reason: 'ffprobe-error' }));
+    probe.on('close', (code) => {
+      if (settled) return;
+      if (code !== 0) {
+        finish({ eligible: false, reason: 'ffprobe-error' });
+        return;
+      }
+
+      try {
+        const metadata = JSON.parse(output);
+        const video = metadata.streams?.[0];
+        if (!video) {
+          finish({ eligible: false, reason: 'video-stream-not-found' });
+          return;
+        }
+        if (video.codec_name !== 'h264') {
+          finish({ eligible: false, reason: 'codec-not-h264' });
+          return;
+        }
+
+        const [rateNumerator, rateDenominator] = String(video.r_frame_rate || '').split('/').map(Number);
+        const fps = rateDenominator ? rateNumerator / rateDenominator : Number(video.r_frame_rate);
+        if (!Number.isFinite(fps) || fps <= 0 || fps > 60) {
+          finish({ eligible: false, reason: 'fps-over-60-or-unknown' });
+          return;
+        }
+
+        const bitrate = Number(video.bit_rate);
+        if (!Number.isFinite(bitrate) || bitrate <= 0 || bitrate > 8000000) {
+          finish({ eligible: false, reason: 'bitrate-over-8000000-or-unknown' });
+          return;
+        }
+
+        const width = Number(video.width);
+        const height = Number(video.height);
+        if (!Number.isInteger(width) || !Number.isInteger(height)
+          || width <= 0 || height <= 0 || Math.max(width, height) > 1920
+          || width % 2 !== 0 || height % 2 !== 0) {
+          finish({ eligible: false, reason: 'resolution-unsupported' });
+          return;
+        }
+
+        const keyframes = (metadata.packets || [])
+          .filter((packet) => String(packet.flags || '').includes('K'))
+          .map((packet) => Number(packet.pts_time))
+          .filter(Number.isFinite)
+          .sort((a, b) => a - b);
+        if (keyframes.length < 2) {
+          finish({ eligible: false, reason: 'keyframe-interval-unknown' });
+          return;
+        }
+        const maxKeyframeInterval = Math.max(...keyframes.slice(1).map((time, index) => time - keyframes[index]));
+        if (!Number.isFinite(maxKeyframeInterval) || maxKeyframeInterval <= 0 || maxKeyframeInterval > 2.5) {
+          finish({ eligible: false, reason: 'keyframe-interval-over-2.5s' });
+          return;
+        }
+
+        finish({ eligible: true, reason: null });
+      } catch {
+        finish({ eligible: false, reason: 'ffprobe-invalid-output' });
+      }
+    });
+  });
 }
 
 /**
@@ -286,6 +392,8 @@ async function launchFfmpegStream(job, lease, abortSignal) {
     let ffmpegStartSequence = 0;
     let telemetryUpdateCount = 0;
     let telemetrySequence = 0;
+    let copyFallbackAttempted = false;
+    let forceTranscode = false;
     const isVertical = orientation === 'vertical';
     const recentFfmpegDiagnostics = [];
     let leaseLostError = null;
@@ -442,7 +550,26 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         '-muxdelay', '0.1'
       );
 
-      if (isVertical) {
+      let copyEligibility = { eligible: false, reason: null };
+      if (forceTranscode) {
+        copyEligibility.reason = 'copy-fallback';
+      } else if (directCopyMode === false) {
+        copyEligibility.reason = 'direct-copy-mode-disabled';
+      } else if (!DIRECT_COPY_ENABLED) {
+        copyEligibility.reason = 'direct-copy-disabled-by-environment';
+      } else {
+        copyEligibility = await probeDirectCopyEligibility(inputSource);
+      }
+      const useDirectCopy = copyEligibility.eligible && !forceTranscode;
+
+      if (useDirectCopy) {
+        ffmpegArgs.push(
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '128k',
+          '-ar', '44100'
+        );
+      } else if (isVertical) {
         ffmpegArgs.push(
           '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
           '-c:v', 'libx264',
@@ -458,27 +585,20 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           '-ar', '44100'
         );
       } else {
-        if (directCopyMode !== false) {
-          ffmpegArgs.push(
-            '-c:v', 'copy',
-            '-c:a', 'aac'
-          );
-        } else {
-          ffmpegArgs.push(
-            '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black',
-            '-c:v', 'libx264',
-            '-preset', 'veryfast',
-            '-tune', 'zerolatency',
-            '-b:v', '6000k',
-            '-maxrate', '6500k',
-            '-bufsize', '12000k',
-            '-pix_fmt', 'yuv420p',
-            '-g', '60',
-            '-c:a', 'aac',
-            '-b:a', '160k',
-            '-ar', '44100'
-          );
-        }
+        ffmpegArgs.push(
+          '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black',
+          '-c:v', 'libx264',
+          '-preset', 'veryfast',
+          '-tune', 'zerolatency',
+          '-b:v', '6000k',
+          '-maxrate', '6500k',
+          '-bufsize', '12000k',
+          '-pix_fmt', 'yuv420p',
+          '-g', '60',
+          '-c:a', 'aac',
+          '-b:a', '160k',
+          '-ar', '44100'
+        );
       }
 
       if (activeDestinations.length === 1) {
@@ -504,6 +624,14 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       const currentProcessSequence = ++ffmpegStartSequence;
       telemetryUpdateCount = 0;
       telemetrySequence = 0;
+      if (useDirectCopy) {
+        console.log('[FFmpeg Mode] copy');
+      } else {
+        console.log('[FFmpeg Mode] transcode (' + (isVertical ? 'vertical' : 'landscape') + ') reason=' + copyEligibility.reason);
+      }
+      const attemptUsedDirectCopy = useDirectCopy;
+      const attemptStartedAt = Date.now();
+      let fallbackScheduled = false;
       currentChild = spawn('ffmpeg', ffmpegArgs);
       const pid = currentChild.pid;
 
@@ -710,6 +838,17 @@ async function launchFfmpegStream(job, lease, abortSignal) {
 
       currentChild.on('exit', async (code, signal) => {
         if (leaseLostError) return;
+        if (attemptUsedDirectCopy && !copyFallbackAttempted && code !== 0
+          && Date.now() - attemptStartedAt <= 20000
+          && !streamController.isIntentionalStop && !isTerminated) {
+          copyFallbackAttempted = true;
+          forceTranscode = true;
+          fallbackScheduled = true;
+          if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+          console.warn('[FFmpeg Mode] copy failed, falling back to transcode');
+          void startFfmpegProcess();
+          return;
+        }
         if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
         // Always clear the 'starting' state regardless of outcome
         try {
@@ -823,6 +962,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         }
       });
       currentChild.on('close', (code) => {
+        if (fallbackScheduled) return;
         // Always clear the 'starting' state on close
         try {
           void updateOwnedStream({
