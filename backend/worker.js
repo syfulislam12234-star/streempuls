@@ -22,6 +22,8 @@ import { Worker } from 'bullmq';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { redisConfig, redisClient, QUEUE_NAME } from './queue.js';
@@ -32,7 +34,7 @@ import { buildStreamDestinations } from './streamDestinations.js';
 import { runWithStreamLease } from './streamLeaseRunner.js';
 import { extractFfmpegErrorLines, sanitizeChildProcessError, sanitizeFfmpegDiagnostic } from './streamDiagnostics.js';
 import { claimStreamOwnership, updateStreamWhenOwned } from './streamOwnership.js';
-import { resolveLocalUpload } from './localVideoSource.js';
+import { downloadVideoToLocalFile, resolveLocalUpload } from './localVideoSource.js';
 
 dotenv.config();
 const DIRECT_COPY_ENABLED = process.env.DIRECT_COPY_ENABLED !== 'false';
@@ -302,6 +304,8 @@ async function launchFfmpegStream(job, lease, abortSignal) {
   let signedUrlGeneratedAt = null;
   let signedUrlTtlMs = null;
   let refreshSignedInputSource = null;
+  let r2SourceToCache = null;
+  let cachedR2SourcePath = null;
   const sensitiveValues = [streamKey, ...(Array.isArray(destinations) ? destinations.map((destination) => destination?.streamKey) : [])];
   if (videoUrl && !videoUrl.startsWith('http://') && !videoUrl.startsWith('https://')) {
     // Resolve API-facing /uploads URLs against this worker's configured local
@@ -313,27 +317,35 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       ) || videoUrl;
     } else {
       const r2Provider = STORAGE_PROVIDER === 'r2' ? getStorageProvider('r2') : null;
-    const cleanPath = r2Provider
-      ? normalizeR2ObjectKey(videoUrl, r2Provider.bucket)
-      : videoUrl.replace(/^(stream-assets|live-stream-assets)\//, '').replace(/^\/+/, '');
-    if (r2Provider) await r2Provider.headObject(cleanPath);
-    let signedUrl = null;
-    try {
-      signedUrl = r2Provider
-        ? await r2Provider.getSignedUrl(cleanPath, SIGNED_SOURCE_URL_TTL_MS / 1000)
-        : await getSignedStorageUrl(cleanPath);
-    } catch (signErr) {
-      console.warn('[FFmpeg Engine] Storage URL signing failed for stream ' + streamId + ': ' + signErr.message);
-    }
-    inputSource = signedUrl || getPublicStorageUrl(cleanPath);
-    if (signedUrl) {
-      const provider = r2Provider || getStorageProvider(STORAGE_PROVIDER);
-      refreshSignedInputSource = () => provider.getSignedUrl(cleanPath, SIGNED_SOURCE_URL_TTL_MS / 1000);
-      signedUrlGeneratedAt = Date.now();
-      signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
-    }
+      const cleanPath = r2Provider
+        ? normalizeR2ObjectKey(videoUrl, r2Provider.bucket)
+        : videoUrl.replace(/^(stream-assets|live-stream-assets)\//, '').replace(/^\/+/, '');
+      if (r2Provider) {
+        const metadata = await r2Provider.headObject(cleanPath);
+        r2SourceToCache = {
+          provider: r2Provider,
+          objectKey: cleanPath,
+          expectedBytes: Number(metadata.ContentLength),
+        };
+        inputSource = '[R2 source will be cached locally]';
+      } else {
+        let signedUrl = null;
+        try {
+          signedUrl = await getSignedStorageUrl(cleanPath);
+        } catch {
+          console.warn('[FFmpeg Engine] Storage URL signing failed for stream ' + streamId);
+        }
+        inputSource = signedUrl || getPublicStorageUrl(cleanPath);
+        if (signedUrl) {
+          const provider = getStorageProvider(STORAGE_PROVIDER);
+          refreshSignedInputSource = () => provider.getSignedUrl(cleanPath, SIGNED_SOURCE_URL_TTL_MS / 1000);
+          signedUrlGeneratedAt = Date.now();
+          signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
+        }
+      }
     }
   } else if (typeof videoUrl === 'string' && /^https?:\/\//i.test(videoUrl)) {
+    let identifiedR2Source = false;
     try {
       const parsedUrl = new URL(videoUrl);
       const r2Provider = getStorageProvider('r2');
@@ -342,6 +354,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         endpoint: r2Provider.endpoint,
         publicDomain: r2Provider.publicDomain,
       });
+      identifiedR2Source = Boolean(r2Object);
       const pathname = decodeURIComponent(parsedUrl.pathname.replace(/^\/+/, ''));
       const supabaseStorageMatch = pathname.match(/^storage\/v1\/object\/(?:public|sign|authenticated)\/[^/]+\/(.+)$/);
       const isSupabaseStorageUrl = parsedUrl.hostname.includes('supabase.co') && Boolean(supabaseStorageMatch);
@@ -349,17 +362,25 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         const isR2Url = Boolean(r2Object);
         const objectKey = isR2Url ? r2Object.key : supabaseStorageMatch[1];
         const provider = isR2Url ? r2Provider : getStorageProvider('supabase');
-        if (isR2Url) await provider.headObject(objectKey);
-        const signedUrl = await provider.getSignedUrl(objectKey, SIGNED_SOURCE_URL_TTL_MS / 1000);
-        if (signedUrl && signedUrl !== videoUrl) {
-          inputSource = signedUrl;
-          refreshSignedInputSource = () => provider.getSignedUrl(objectKey, SIGNED_SOURCE_URL_TTL_MS / 1000);
-          signedUrlGeneratedAt = Date.now();
-          signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
+        if (isR2Url) {
+          const metadata = await provider.headObject(objectKey);
+          r2SourceToCache = { provider, objectKey, expectedBytes: Number(metadata.ContentLength) };
+          inputSource = '[R2 source will be cached locally]';
+        } else {
+          const signedUrl = await provider.getSignedUrl(objectKey, SIGNED_SOURCE_URL_TTL_MS / 1000);
+          if (signedUrl && signedUrl !== videoUrl) {
+            inputSource = signedUrl;
+            refreshSignedInputSource = () => provider.getSignedUrl(objectKey, SIGNED_SOURCE_URL_TTL_MS / 1000);
+            signedUrlGeneratedAt = Date.now();
+            signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
+          }
         }
       }
-    } catch (signErr) {
-      console.warn("[FFmpeg Engine] Storage URL signing failed for stream " + streamId + ": " + signErr.message);
+    } catch {
+      if (identifiedR2Source) {
+        throw new Error('R2 video could not be prepared for local worker storage.');
+      }
+      console.warn('[FFmpeg Engine] Remote video source could not be resolved for stream ' + streamId);
     }
   }
 
@@ -399,6 +420,11 @@ async function launchFfmpegStream(job, lease, abortSignal) {
     let leaseLostError = null;
     let leaseLossHandled = false;
     let heartbeatTimer = null;
+    const cleanupCachedR2Source = async () => {
+      const cachedPath = cachedR2SourcePath;
+      cachedR2SourcePath = null;
+      if (cachedPath) await fs.promises.rm(cachedPath, { force: true }).catch(() => {});
+    };
     const handleAbort = () => { void streamController.stop('Start cancelled before broadcast'); };
     const updateOwnedStream = (updates, release = false) => updateStreamWhenOwned(supabase, {
       streamId,
@@ -430,6 +456,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         }
 
         await terminateFfmpegChild(currentChild);
+        await cleanupCachedR2Source();
         activeStreams.delete(streamId);
 
         const released = await updateOwnedStream({
@@ -461,6 +488,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       streamController.isIntentionalStop = true;
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       await terminateFfmpegChild(currentChild);
+      await cleanupCachedR2Source();
       activeStreams.delete(streamId);
       const safeError = 'Distributed stream lock was lost; FFmpeg was stopped to avoid split ownership.';
       try {
@@ -494,6 +522,27 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         if (leaseLostError) reject(new Error('Distributed stream lock was lost; FFmpeg was stopped.'));
         else resolve();
         return;
+      }
+
+      if (r2SourceToCache && !cachedR2SourcePath) {
+        try {
+          const signedUrl = await r2SourceToCache.provider.getSignedUrl(
+            r2SourceToCache.objectKey,
+            SIGNED_SOURCE_URL_TTL_MS / 1000,
+          );
+          if (!signedUrl) throw new Error('R2 signing returned no source URL.');
+          const safeStreamId = String(streamId).replace(/[^a-zA-Z0-9_-]/g, '_');
+          const cachePath = path.join(os.tmpdir(), 'streempulse-video-cache', `${safeStreamId}-${randomUUID()}.input`);
+          cachedR2SourcePath = await downloadVideoToLocalFile(signedUrl, cachePath, {
+            expectedBytes: r2SourceToCache.expectedBytes,
+            signal: abortSignal,
+          });
+          inputSource = cachedR2SourcePath;
+          console.log('[FFmpeg Engine] R2 source cached locally for stream ' + streamId);
+        } catch {
+          await handleProcessCrash(new Error('R2 video could not be cached in local worker storage.'), null, null);
+          return;
+        }
       }
 
       if (refreshSignedInputSource && signedUrlGeneratedAt && signedUrlTtlMs
@@ -907,6 +956,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
               timestamp: new Date().toISOString(),
             }));
           } catch {}
+          await cleanupCachedR2Source();
           console.log(`[FFmpeg Exit] Stream ${streamId} idle (intentionally stopped/terminated)`);
           resolve();
         } else if (code === 0 && !signal) {
@@ -929,6 +979,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
               timestamp: new Date().toISOString(),
             }));
           } catch {}
+          await cleanupCachedR2Source();
           console.log(`[FFmpeg Exit] Stream ${streamId} live (exit code: ${code}, signal: ${signal})`);
           resolve();
         } else {
@@ -1004,6 +1055,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       if (isTerminated || streamController.isIntentionalStop) {
         activeStreams.delete(streamId);
         abortSignal?.removeEventListener('abort', handleAbort);
+        await cleanupCachedR2Source();
         resolve();
         return;
       }
@@ -1133,6 +1185,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           return;
         }
 
+        await cleanupCachedR2Source();
         reject(new Error(permanentFailureLog));
       }
     }
