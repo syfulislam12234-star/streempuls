@@ -86,7 +86,7 @@ test('a caller-supplied admin role without a valid token does not authorize acce
   assert.equal(canAccessStream(null, otherStream), false);
 });
 
-test('new custom-auth users are upserted into public.users with conflict handling by id', async () => {
+test('new custom-auth users are upserted into public.profiles with conflict handling by id', async () => {
   let insertedTable;
   let insertedUser;
   let options;
@@ -116,15 +116,13 @@ test('new custom-auth users are upserted into public.users with conflict handlin
 
   await upsertUserToSupabase(user, database);
 
-  assert.equal(insertedTable, 'users');
+  assert.equal(insertedTable, 'profiles');
   assert.equal(insertedUser.id, user.id);
   assert.equal(insertedUser.email, user.email);
   assert.equal(insertedUser.created_at, user.created_at);
-  assert.equal(insertedUser.admin, false);
   assert.equal(insertedUser.subscription_status, 'unpaid');
-  assert.equal(insertedUser.business, true);
+  assert.equal(insertedUser.full_name, 'new');
   assert.equal(insertedUser.password_hash, user.password_hash);
-  assert.equal(insertedUser.password_salt, user.password_salt);
   assert.equal(insertedUser.auth_token_hash, user.auth_token_hash);
   assert.deepEqual(options, { onConflict: 'id' });
 });
@@ -140,12 +138,12 @@ test('user upsert rejects incomplete identity and credential payloads before dat
 
   await assert.rejects(
     upsertUserToSupabase({ id: 'new-user', email: 'new@example.test' }, database),
-    /required fields are missing \(password_hash, password_salt, auth_token_hash\)/,
+    /required fields are missing \(password_hash, auth_token_hash\)/,
   );
   assert.equal(databaseCalled, false);
 });
 
-test('user upsert excludes fields outside the public.users schema', async () => {
+test('profile upsert excludes fields outside the public.profiles schema', async () => {
   let insertedUser;
   const database = {
     from() {
@@ -157,7 +155,6 @@ test('user upsert excludes fields outside the public.users schema', async () => 
     id: 'new-user',
     email: 'new@example.test',
     password_hash: 'hash',
-    password_salt: 'salt',
     auth_token_hash: 'token-hash',
     password: 'must-not-be-persisted',
     clientOnly: true,
@@ -165,28 +162,25 @@ test('user upsert excludes fields outside the public.users schema', async () => 
 
   assert.equal(insertedUser.id, 'new-user');
   assert.equal(insertedUser.email, 'new@example.test');
-  assert.equal(insertedUser.admin, false);
-  assert.equal(insertedUser.business, false);
   assert.equal(insertedUser.password_hash, 'hash');
-  assert.equal(insertedUser.password_salt, 'salt');
   assert.equal(insertedUser.auth_token_hash, 'token-hash');
   assert.equal(Object.hasOwn(insertedUser, 'password'), false);
   assert.equal(Object.hasOwn(insertedUser, 'clientOnly'), false);
 });
 
-test('enterprise users schema includes all custom registration columns', () => {
+test('enterprise profiles schema includes custom-auth credentials and legacy migration', () => {
   const schema = fs.readFileSync(new URL('../../supabase_enterprise_schema.sql', import.meta.url), 'utf8');
-  const usersTable = schema.match(/CREATE TABLE IF NOT EXISTS public\.users\s*\(([\s\S]*?)\n\);/i)?.[1];
-  assert.ok(usersTable, 'migration must create public.users');
+  const profilesTable = schema.match(/CREATE TABLE IF NOT EXISTS public\.profiles\s*\(([\s\S]*?)\n\);/i)?.[1];
+  assert.ok(profilesTable, 'migration must create public.profiles');
   for (const column of [
-    'id', 'email', 'full_name', 'created_at', 'updated_at', 'role', 'admin',
-    'subscription_tier', 'subscription_status', 'business', 'channel_limit',
+    'id', 'email', 'full_name', 'created_at', 'updated_at', 'role',
+    'subscription_tier', 'subscription_status', 'channel_limit',
     'password_hash', 'password_salt', 'auth_token_hash',
   ]) {
-    assert.match(usersTable, new RegExp(`^\\s*${column}\\s`, 'im'), `users table must define ${column}`);
+    assert.match(profilesTable, new RegExp(`^\\s*${column}\\s`, 'im'), `profiles table must define ${column}`);
   }
   assert.match(schema, /ADD COLUMN IF NOT EXISTS referred_by_code VARCHAR\(30\)/i);
-  assert.match(schema, /CREATE UNIQUE INDEX IF NOT EXISTS users_id_upsert_uidx ON public\.users\(id\)/i);
+  assert.match(schema, /INSERT INTO public\.profiles[\s\S]*FROM public\.users[\s\S]*ON CONFLICT DO NOTHING/i);
 });
 
 test('Supabase user sync failures are not swallowed', async () => {
@@ -220,6 +214,6 @@ test('Supabase user sync failures are not swallowed', async () => {
   } finally {
     console.error = originalError;
   }
-  assert.equal(logged[0][0], '[Supabase] Failed to persist new user; exact Supabase error object follows:');
+  assert.equal(logged[0][0], '[Supabase] Failed to persist user profile; exact Supabase error object follows:');
   assert.equal(logged[1][0], supabaseError, 'log the original Supabase error object, not a reduced copy');
 });

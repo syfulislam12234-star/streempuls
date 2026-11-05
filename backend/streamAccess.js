@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { supabase } from './supabase.js';
+import { supabase, SUPABASE_ADMIN_CONFIGURED } from './supabase.js';
 
 const USERS_FILE = path.join(
   process.env.DATA_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data'),
@@ -18,30 +18,30 @@ function readLocalUsers() {
   }
 }
 
-/** Fetch all users from Supabase users table for authentication. */
+/** Fetch profile rows used for custom-auth sessions from Supabase. */
 export async function fetchUsersFromSupabase() {
   let databaseUsers = [];
-  try {
-    const { data, error } = await supabase.from('users').select('*');
-    if (error) {
-      console.warn('[Supabase] Failed to fetch users:', error.message);
-    } else if (Array.isArray(data)) {
-      databaseUsers = data;
+  if (SUPABASE_ADMIN_CONFIGURED) {
+    try {
+      const { data, error } = await supabase.from('profiles').select('*');
+      if (error) throw error;
+      if (Array.isArray(data)) databaseUsers = data;
+    } catch (error) {
+      console.error('[Supabase] Failed to fetch profiles for authentication:', error);
+      throw new Error('Unable to verify the authentication session.', { cause: error });
     }
-  } catch (err) {
-    console.warn('[Supabase] Error fetching users:', err.message);
   }
 
-  // The backend's current signup flow also persists locally. Merge that source
-  // so sessions remain usable during DB outages and before older users sync.
-  const usersById = new Map(databaseUsers.map((user) => [user.id, user]));
-  for (const user of readLocalUsers()) usersById.set(user.id, { ...usersById.get(user.id), ...user });
+  // Keep old local-only accounts usable, but treat the configured database as
+  // authoritative for profile fields and token revocation.
+  const usersById = new Map(readLocalUsers().map((user) => [user.id, user]));
+  for (const user of databaseUsers) usersById.set(user.id, user);
   return [...usersById.values()];
 }
 
-/** Persist this app's custom-auth user record for API/worker authentication. */
+/** Persist custom-auth credentials and profile data in public.profiles. */
 export async function upsertUserToSupabase(user, database = supabase) {
-  const requiredFields = ['id', 'email', 'password_hash', 'password_salt', 'auth_token_hash'];
+  const requiredFields = ['id', 'email', 'password_hash', 'auth_token_hash'];
   const missingFields = requiredFields.filter((field) =>
     typeof user?.[field] !== 'string' || user[field].trim().length === 0,
   );
@@ -57,10 +57,8 @@ export async function upsertUserToSupabase(user, database = supabase) {
     email: user.email.trim().toLowerCase(),
     full_name: typeof user.full_name === 'string' && user.full_name.trim() ? user.full_name.trim() : user.email.trim().split('@')[0],
     role,
-    admin: role === 'admin' || role === 'super_admin',
     subscription_tier: subscriptionTier,
     subscription_status: typeof user.subscription_status === 'string' ? user.subscription_status : 'unpaid',
-    business: user.business === true || subscriptionTier === 'business',
     channel_limit: user.channel_limit ?? 1,
     video_limit: user.video_limit ?? 1,
     duration_days: user.duration_days ?? 3,
@@ -69,7 +67,7 @@ export async function upsertUserToSupabase(user, database = supabase) {
     is_brand_free: user.is_brand_free ?? false,
     price_bdt: user.price_bdt ?? 0,
     password_hash: user.password_hash,
-    password_salt: user.password_salt,
+    password_salt: user.password_salt ?? null,
     auth_token_hash: user.auth_token_hash,
     expires_at: user.expires_at ?? null,
     referral_code: user.referral_code ?? null,
@@ -81,12 +79,12 @@ export async function upsertUserToSupabase(user, database = supabase) {
   };
 
   try {
-    const { error } = await database.from('users').upsert(payload, { onConflict: 'id' });
+    const { error } = await database.from('profiles').upsert(payload, { onConflict: 'id' });
     if (error) throw error;
   } catch (error) {
     // Log the original PostgREST/PostgreSQL error object intact for diagnosis;
     // keep the response returned to the browser free of database internals.
-    console.error('[Supabase] Failed to persist new user; exact Supabase error object follows:');
+    console.error('[Supabase] Failed to persist user profile; exact Supabase error object follows:');
     console.error(error);
     throw new Error('Unable to save the account profile to Supabase. Please try again later.', { cause: error });
   }

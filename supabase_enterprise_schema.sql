@@ -34,9 +34,19 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   referred_by_code VARCHAR(30),
   reward_credits_bdt NUMERIC(10, 2) DEFAULT 0,
   trial_days_bonus INT DEFAULT 0,
+  -- Custom API authentication credentials. These hashes are never returned to clients.
+  password_hash TEXT,
+  password_salt TEXT,
+  auth_token_hash TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Upgrade existing profiles without replacing the table or its application data.
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS password_hash TEXT,
+  ADD COLUMN IF NOT EXISTS password_salt TEXT,
+  ADD COLUMN IF NOT EXISTS auth_token_hash TEXT;
 
 -- Index for speedy lookups
 CREATE INDEX IF NOT EXISTS idx_profiles_email ON public.profiles(email);
@@ -45,11 +55,10 @@ CREATE INDEX IF NOT EXISTS idx_profiles_sub_status ON public.profiles(subscripti
 CREATE INDEX IF NOT EXISTS idx_profiles_expires_at ON public.profiles(expires_at);
 
 -- ----------------------------------------------------------------------------
--- 1b. USERS TABLE
--- The API currently issues its own Bearer sessions rather than calling
--- supabase.auth.signUp(). Keep the account/token hashes in this service-role
--- managed table so stream authentication can resolve newly registered users.
--- Never store the submitted plaintext password.
+-- 1b. LEGACY USERS TABLE
+-- Retained for compatibility with existing installs; auth now reads/writes
+-- profiles and the migration below copies existing records. Never store the
+-- submitted plaintext password.
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.users (
   id TEXT PRIMARY KEY,
@@ -130,6 +139,24 @@ BEGIN
 END $$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS users_id_upsert_uidx ON public.users(id);
+
+-- Move legacy custom-auth accounts into profiles so new auth reads and writes
+-- use the application profile table. Existing profile rows take precedence.
+INSERT INTO public.profiles (
+  id, email, full_name, role, subscription_tier, subscription_status,
+  channel_limit, video_limit, duration_days, hour_limit, has_watermark,
+  is_brand_free, price_bdt, expires_at, referral_code, referred_by_code,
+  reward_credits_bdt, trial_days_bonus, password_hash, password_salt, auth_token_hash,
+  created_at, updated_at
+)
+SELECT
+  id, email, full_name, CASE WHEN role = 'admin' THEN 'admin' ELSE 'user' END,
+  subscription_tier, subscription_status, channel_limit, video_limit,
+  duration_days, hour_limit, has_watermark, is_brand_free, price_bdt,
+  expires_at, referral_code, referred_by_code, reward_credits_bdt,
+  trial_days_bonus, password_hash, password_salt, auth_token_hash, created_at, updated_at
+FROM public.users
+ON CONFLICT DO NOTHING;
 
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.users FROM anon, authenticated;

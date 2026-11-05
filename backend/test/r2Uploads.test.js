@@ -156,6 +156,17 @@ test('direct R2 upload, confirmation, private preview, and per-user asset isolat
   await waitForApi(api, baseUrl);
   const { userId: ownerUserId, credentials: ownerCredentials } = await registerUser(baseUrl, 'owner');
   const { credentials: otherCredentials } = await registerUser(baseUrl, 'other');
+  const savedUsers = JSON.parse(fs.readFileSync(path.join(tempDir, 'users.json'), 'utf8'));
+  const savedOwner = savedUsers.find((user) => user.id === ownerUserId);
+  assert.match(savedOwner.password_hash, /^\$2[aby]\$/);
+  assert.equal(Object.hasOwn(savedOwner, 'password'), false);
+  assert.equal(Object.hasOwn(savedOwner, 'password_salt'), false);
+  const invalidLogin = await postJson(baseUrl, '/api/auth/login', {
+    email: ownerCredentials.email,
+    password: 'incorrect-password',
+  });
+  assert.equal(invalidLogin.status, 401);
+  assert.equal((await invalidLogin.json()).error, 'Invalid email or password.');
   const ownerLogin = await postJson(baseUrl, '/api/auth/login', ownerCredentials);
   const otherLogin = await postJson(baseUrl, '/api/auth/login', otherCredentials);
   assert.equal(ownerLogin.status, 200);

@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
+import bcrypt from 'bcryptjs';
 import { getR2Configuration } from './r2Config.js';
 import { validateStreamConfiguration } from './streamDestinations.js';
 import { ensureStreamRecord, StreamPersistenceError } from './streamPersistence.js';
@@ -238,7 +239,16 @@ async function createR2PreviewUrl(key) {
   );
 }
 
-function verifyPassword(user, password) {
+async function verifyPassword(user, password) {
+  if (typeof user.password_hash === 'string' && /^\$2[aby]\$/.test(user.password_hash)) {
+    try {
+      return await bcrypt.compare(password, user.password_hash);
+    } catch (error) {
+      console.error('[Auth] Password hash verification failed:', error);
+      return false;
+    }
+  }
+
   if (typeof user.password_hash === 'string' && typeof user.password_salt === 'string') {
     try {
       const actualHash = scryptSync(password, user.password_salt, 64);
@@ -544,27 +554,43 @@ app.get('/api/auth/me', (req, res) => {
   return res.json({ success: true, user: safeUser(user) });
 });
 
-app.post('/api/auth/register', async (req, res, next) => {
+app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, full_name, fullName } = req.body || {};
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
     const normalizedName = typeof (full_name ?? fullName) === 'string' ? (full_name ?? fullName).trim() : '';
 
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-      return res.status(400).json({ success: false, error: 'A valid email address is required' });
+      return res.status(400).json({ success: false, error: 'Enter a valid email address.' });
     }
-    if (typeof password !== 'string' || password.length < 8) {
-      return res.status(400).json({ success: false, error: 'Password must be at least 8 characters long' });
+    if (typeof password !== 'string' || Buffer.byteLength(password, 'utf8') < 8 || Buffer.byteLength(password, 'utf8') > 72) {
+      return res.status(400).json({ success: false, error: 'Password must be between 8 and 72 bytes.' });
+    }
+    if (!normalizedName || normalizedName.length > 120) {
+      return res.status(400).json({ success: false, error: 'Full name is required and must be 120 characters or fewer.' });
     }
 
     const users = readUsers();
-    if (users.some((user) => String(user.email).toLowerCase() === normalizedEmail)) {
+    if (users.some((user) => String(user.email).trim().toLowerCase() === normalizedEmail)) {
       return res.status(409).json({ success: false, error: 'An account with this email already exists' });
     }
 
+    if (SUPABASE_ADMIN_CONFIGURED) {
+      try {
+        const { data: existingProfile, error } = await supabase
+          .from('profiles').select('id').eq('email', normalizedEmail).maybeSingle();
+        if (error) throw error;
+        if (existingProfile) {
+          return res.status(409).json({ success: false, error: 'An account with this email already exists' });
+        }
+      } catch (error) {
+        console.error('[Auth] Supabase profile duplicate check failed:', error);
+        return res.status(503).json({ success: false, error: 'Account services are temporarily unavailable. Please try again later.' });
+      }
+    }
+
     const now = new Date().toISOString();
-    const passwordSalt = randomBytes(16).toString('hex');
-    const passwordHash = scryptSync(password, passwordSalt, 64).toString('hex');
+    const passwordHash = await bcrypt.hash(password, 12);
     const accessToken = randomBytes(32).toString('hex');
     const userId = randomUUID();
     const tierConfig = getTierConfig('free');
@@ -577,17 +603,17 @@ app.post('/api/auth/register', async (req, res, next) => {
       subscription_status: 'unpaid',
       ...tierConfig,
       password_hash: passwordHash,
-      password_salt: passwordSalt,
       auth_token_hash: createHash('sha256').update(accessToken).digest('hex'),
       created_at: now,
       updated_at: now,
     };
 
-    if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    if (SUPABASE_ADMIN_CONFIGURED) {
       try {
         await upsertUserToSupabase(user);
       } catch (error) {
-        return res.status(503).json({ success: false, error: error.message });
+        console.error('[Auth] Supabase profile creation failed:', error);
+        return res.status(503).json({ success: false, error: 'Unable to create your account right now. Please try again later.' });
       }
     }
 
@@ -603,36 +629,62 @@ app.post('/api/auth/register', async (req, res, next) => {
       message: 'Account registered successfully.',
     });
   } catch (error) {
-    return next(error);
+    console.error('[Auth] Registration failed:', error);
+    return res.status(500).json({ success: false, error: 'Unable to create your account right now. Please try again later.' });
   }
 });
 
-app.post('/api/auth/login', (req, res, next) => {
+app.post('/api/auth/login', async (req, res) => {
   try {
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     const password = req.body?.password;
-    if (!email || typeof password !== 'string' || password.length === 0) {
-      return res.status(400).json({ success: false, error: 'Email and password are required.' });
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || typeof password !== 'string' || password.length === 0 || Buffer.byteLength(password, 'utf8') > 72) {
+      return res.status(400).json({ success: false, error: 'A valid email and password are required.' });
     }
 
     const users = readUsers();
-    const userIndex = users.findIndex((user) => String(user.email || '').trim().toLowerCase() === email);
-    if (userIndex === -1 || !verifyPassword(users[userIndex], password)) {
+    let userIndex = users.findIndex((user) => String(user.email || '').trim().toLowerCase() === email);
+    let persistedUser = userIndex === -1 ? null : users[userIndex];
+
+    if (SUPABASE_ADMIN_CONFIGURED) {
+      try {
+        const { data: profile, error } = await supabase
+          .from('profiles').select('*').eq('email', email).maybeSingle();
+        if (error) throw error;
+        if (profile) persistedUser = profile;
+      } catch (error) {
+        console.error('[Auth] Supabase profile lookup failed:', error);
+        return res.status(503).json({ success: false, error: 'Sign-in is temporarily unavailable. Please try again later.' });
+      }
+    }
+
+    if (!persistedUser || !await verifyPassword(persistedUser, password)) {
       return res.status(401).json({ success: false, error: 'Invalid email or password.' });
     }
 
     const accessToken = randomBytes(32).toString('hex');
-    const user = { ...users[userIndex] };
+    const user = { ...persistedUser };
 
-    // Upgrade legacy plaintext password storage after successful verification.
-    if (!user.password_hash || !user.password_salt) {
-      user.password_salt = randomBytes(16).toString('hex');
-      user.password_hash = scryptSync(password, user.password_salt, 64).toString('hex');
+    // Upgrade legacy scrypt/plaintext records after successful verification.
+    if (!/^\$2[aby]\$/.test(user.password_hash || '')) {
+      user.password_hash = await bcrypt.hash(password, 12);
       delete user.password;
+      delete user.password_salt;
     }
     user.auth_token_hash = createHash('sha256').update(accessToken).digest('hex');
     user.updated_at = new Date().toISOString();
-    users[userIndex] = user;
+    if (SUPABASE_ADMIN_CONFIGURED) {
+      try {
+        await upsertUserToSupabase(user);
+      } catch (error) {
+        console.error('[Auth] Supabase profile session update failed:', error);
+        return res.status(503).json({ success: false, error: 'Sign-in is temporarily unavailable. Please try again later.' });
+      }
+    }
+
+    if (userIndex === -1) userIndex = users.findIndex((entry) => entry.id === user.id);
+    if (userIndex >= 0) users[userIndex] = user;
+    else users.unshift(user);
     writeUsers(users);
 
     return res.status(200).json({
@@ -644,7 +696,8 @@ app.post('/api/auth/login', (req, res, next) => {
       message: `Signed in as ${user.email}.`,
     });
   } catch (error) {
-    return next(error);
+    console.error('[Auth] Sign-in failed:', error);
+    return res.status(500).json({ success: false, error: 'Sign-in is temporarily unavailable. Please try again later.' });
   }
 });
 

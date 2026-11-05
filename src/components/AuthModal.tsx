@@ -127,6 +127,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <label className="text-xs font-semibold text-slate-300 block">Full Name</label>
               <input
                 type="text"
+                required
+                maxLength={120}
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
                 placeholder="e.g. Alex Johnson"
