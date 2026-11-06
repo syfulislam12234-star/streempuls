@@ -439,7 +439,7 @@ async function makeRoom({ lockProvider, cacheDir, requiredBytes, protectedCacheI
 /**
  * Acquire a verified, shared local cache entry for a remote storage object.
  * The callback downloads to a provided temporary path and must honor its signal.
- * @param {{ redis: any, cacheDir: string, identity: unknown, expectedBytes?: number, maxFileBytes?: number, minFreeBytes?: number, signal?: AbortSignal, download: Function, onProgress?: Function }} options
+ * @param {{ redis?: any, lockProvider?: { namespace: string, acquire: Function }, cacheDir: string, identity: unknown, expectedBytes?: number, maxFileBytes?: number, minFreeBytes?: number, signal?: AbortSignal, download: (destinationPath: string, options: { signal?: AbortSignal, onProgress?: (receivedBytes: number, totalBytes?: number) => void }) => Promise<unknown>, verify?: Function, onProgress?: (receivedBytes: number, totalBytes?: number) => void }} options
  */
 export async function acquireVideoCache({
   redis,
@@ -575,7 +575,12 @@ export async function acquireVideoCache({
   throw new Error('Timed out waiting for the local video cache.');
 }
 
-/** Remove incomplete download files left by workers that crashed mid-transfer. */
+/**
+ * Remove incomplete download files left by workers that crashed mid-transfer.
+ * @param {string} cacheDir
+ * @param {{ redis?: any, lockProvider?: { namespace: string, acquire: Function }, olderThanMs?: number }} [options]
+ * @returns {Promise<number>}
+ */
 export async function cleanupOrphanedVideoCacheFiles(cacheDir, { redis, lockProvider: providedLockProvider, olderThanMs = 60 * 60 * 1000 } = {}) {
   const resolvedCacheDir = path.resolve(cacheDir);
   await fs.promises.mkdir(resolvedCacheDir, { recursive: true, mode: 0o750 });

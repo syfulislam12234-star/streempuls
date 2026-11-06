@@ -22,13 +22,13 @@ import {
 } from './src/services/storageProvider.ts';
 import { fileURLToPath } from 'url';
 import { extractFfmpegErrorLines, sanitizeChildProcessError, sanitizeFfmpegDiagnostic } from './backend/streamDiagnostics.js';
-import { buildStreamDestinations, validateStreamConfiguration } from './backend/streamDestinations.js';
+import { buildStreamDestinationPlan, selectStreamDestinationsForAttempt, validateStreamConfiguration } from './backend/streamDestinations.js';
 import { claimStreamOwnership, isStaleHeartbeat, reconcileStaleStreamRecords, updateStreamWhenOwned } from './backend/streamOwnership.js';
 import { countActiveStreams, reconcileLocalStreamState } from './backend/streamQuota.js';
 import { parseR2ObjectUrl, normalizeR2ObjectKey } from './backend/r2ObjectUrl.js';
 import { acquireVideoCache, cleanupOrphanedVideoCacheFiles, createInProcessCacheLockProvider, getVideoCacheStats } from './backend/videoCache.js';
 import { downloadVideoToLocalFile } from './backend/localVideoSource.js';
-import { parseFfmpegProgressRecord, probeFfmpegVideoMetadata, readProcessMemoryMb, sampleProcessCpuPercent } from './backend/ffmpegProgress.js';
+import { directCopyIneligibility, parseFfmpegProgressRecord, probeFfmpegVideoMetadata, readProcessMemoryMb, sampleProcessCpuPercent } from './backend/ffmpegProgress.js';
 import { scheduleRestartAfterExit } from './backend/ffmpegLifecycle.js';
 import { getCacheFallbackReason, retryCachePreparation } from './backend/cacheFallback.js';
 import {
@@ -948,7 +948,6 @@ interface ActiveWorkerProcess {
   cacheRelease?: () => Promise<void>;
   cacheStatus?: string;
   directCopyMode?: boolean;
-  cacheStatus?: string;
   containerId?: string;
   tier?: string;
   routingMetadata?: any;
@@ -3800,12 +3799,13 @@ app.post('/api/streams/:id/start', async (req, res) => {
       stream.stream_key,
       ...(Array.isArray(stream.destinations) ? stream.destinations.map((destination: any) => destination?.streamKey) : []),
     ].filter((value): value is string => typeof value === 'string' && value.length > 0);
-    const finalDestinationsList = buildStreamDestinations({
+    const destinationPlan = buildStreamDestinationPlan({
       rtmpServerUrl: stream.rtmp_server_url || 'rtmp://a.rtmp.youtube.com/live2',
       streamKey: stream.stream_key,
       destinations: stream.destinations,
       subscriptionTier: userTier,
     });
+    const finalDestinationsList = destinationPlan.destinations;
     let actualVideoMode: 'copy' | 'transcode' = 'transcode';
 
     const activeStorageAdapter = getStorageProvider();
@@ -3893,6 +3893,7 @@ app.post('/api/streams/:id/start', async (req, res) => {
     const MAX_RESTART_RETRIES = 5;
     const BASE_RECONNECT_DELAY_MS = 3000;
     let reconnectAttempts = 0;
+    let youtubeBackupActive = false;
     let copyFallbackAttempted = false;
     let streamForceTranscode = false;
     const isProcessStartCancelled = () => {
@@ -4012,15 +4013,21 @@ app.post('/api/streams/:id/start', async (req, res) => {
           broadcastTelemetry(id, modeProcess.telemetry);
         }
 
-        if (finalDestinationsList.length === 1) {
+        const attemptDestinations = selectStreamDestinationsForAttempt(destinationPlan, {
+          useYoutubeBackup: youtubeBackupActive,
+        });
+        if (attemptDestinations.length === 1) {
           ffmpegArgs.push(
             '-flvflags', 'no_duration_filesize',
             '-f', 'flv',
-            finalDestinationsList[0]
+            attemptDestinations[0]
           );
         } else {
-          // Multi-destination tee muxer with onfail=ignore
-          const teeOutputs = finalDestinationsList.map((url) => `[f=flv:onfail=ignore]${url}`).join('|');
+          // Abort the primary output so a YouTube backup can take over on reconnect.
+          // Keep unrelated secondary destinations isolated with onfail=ignore.
+          const teeOutputs = attemptDestinations
+            .map((url, index) => `[f=flv:onfail=${index === 0 && destinationPlan.backup ? 'abort' : 'ignore'}]${url}`)
+            .join('|');
           ffmpegArgs.push(
             '-flags', '+global_header',
             '-f', 'tee',
@@ -4085,13 +4092,15 @@ app.post('/api/streams/:id/start', async (req, res) => {
             : Math.max(0, progress.droppedFrames - previousDroppedFrames);
           if (progress.droppedFrames !== null) previousDroppedFrames = progress.droppedFrames;
 
-          proc.telemetry = {
+          const telemetry: StreamTelemetryData = {
             ...proc.telemetry,
-            ...(progress.bitrateKbps !== null ? { bitrate_kbps: progress.bitrateKbps } : {}),
-            ...(progress.fps !== null ? { fps: progress.fps } : {}),
-            ...(progress.droppedFrames !== null ? { dropped_frames: progress.droppedFrames } : {}),
-            ...(sampledCpu.cpuPercent !== null ? { cpu_usage_pct: +sampledCpu.cpuPercent.toFixed(2) } : {}),
-            ...(ffmpegMemoryMb !== null ? { mem_usage_mb: ffmpegMemoryMb } : {}),
+            bitrate_kbps: progress.bitrateKbps ?? proc.telemetry?.bitrate_kbps ?? 0,
+            fps: progress.fps ?? proc.telemetry?.fps ?? 0,
+            dropped_frames: progress.droppedFrames ?? proc.telemetry?.dropped_frames ?? null,
+            cpu_usage_pct: sampledCpu.cpuPercent === null
+              ? proc.telemetry?.cpu_usage_pct ?? null
+              : +sampledCpu.cpuPercent.toFixed(2),
+            mem_usage_mb: ffmpegMemoryMb ?? proc.telemetry?.mem_usage_mb ?? null,
             health_status: droppedDelta === null ? proc.telemetry?.health_status || 'unknown' : droppedDelta > 0 ? 'warning' : 'good',
             speed: progress.speed === null ? null : `${progress.speed.toFixed(2)}x`,
             output_time_seconds: progress.outputTimeSeconds,
@@ -4100,9 +4109,11 @@ app.post('/api/streams/:id/start', async (req, res) => {
               : +Math.max(0, (now - proc.startedAt.getTime()) / 1000 - progress.outputTimeSeconds).toFixed(2),
             video_mode: actualVideoMode,
             uptime_seconds: uptimeSeconds,
+            destinations_count: proc.telemetry?.destinations_count ?? finalDestinationsList.length,
             timestamp: new Date(now).toISOString(),
           };
-          broadcastTelemetry(id, proc.telemetry);
+          proc.telemetry = telemetry;
+          broadcastTelemetry(id, telemetry);
 
           if (now - lastMetricsWriteAt >= 2000) {
             lastMetricsWriteAt = now;
@@ -4209,6 +4220,10 @@ app.post('/api/streams/:id/start', async (req, res) => {
           } else {
             // Autonomous Auto-Recovery Mechanism
             if (reconnectAttempts < MAX_RESTART_RETRIES && proc && !proc.isIntentionalStop) {
+              if (destinationPlan.backup && !youtubeBackupActive) {
+                youtubeBackupActive = true;
+                console.warn(`[YouTube Failover] Stream ${id} will reconnect to the configured backup RTMP endpoint.`);
+              }
               reconnectAttempts++;
               proc.reconnectAttempts = reconnectAttempts;
               const backoff = Math.min(BASE_RECONNECT_DELAY_MS * Math.pow(2, reconnectAttempts - 1), 60000);
@@ -4344,7 +4359,7 @@ app.post('/api/streams/:id/start', async (req, res) => {
             minFreeBytes,
             signal: activeProcess.cacheAbortController?.signal,
             verify: probeFfmpegVideoMetadata,
-            onProgress: (receivedBytes, totalBytes) => {
+            onProgress: (receivedBytes: number, totalBytes: number | undefined) => {
               const now = Date.now();
               if (now - lastProgressAt < 1000) return;
               const elapsedSeconds = Math.max((now - lastProgressTime) / 1000, 0.001);

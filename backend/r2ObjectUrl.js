@@ -29,6 +29,9 @@ function removeExactPrefix(segments, prefix) {
  * Parse the R2 URL forms emitted by the app and S3 signer into an explicit
  * bucket/key pair. Only configured endpoint/domain and bucket-host formats are
  * accepted; path segments are never guessed away.
+ * @param {string} value
+ * @param {{ bucket: string, endpoint?: string, publicDomain?: string }} options
+ * @returns {{ bucket: string, key: string } | null}
  */
 export function parseR2ObjectUrl(value, {
   bucket,

@@ -1,4 +1,5 @@
 const DEFAULT_RTMP_SERVER_URL = 'rtmp://a.rtmp.youtube.com/live2';
+const YOUTUBE_BACKUP_SERVER_URL = 'rtmp://b.rtmp.youtube.com/live2';
 
 /**
  * @typedef {{
@@ -64,17 +65,53 @@ export function buildRtmpDestination(serverUrl, streamKey) {
 }
 
 /**
- * Build each enabled output independently. The current FFmpeg tee architecture
- * broadcasts to these outputs concurrently; it does not implement failover.
+ * Recognize only YouTube's documented backup endpoint form. A query string is
+ * otherwise rejected by the normal RTMP server URL validator.
  */
-/** @param {StreamConfiguration} [configuration] */
-export function buildStreamDestinations({
+function buildYoutubeBackupDestination(serverUrl, streamKey, primaryStreamKey) {
+  let parsed;
+  try {
+    parsed = new URL(serverUrl);
+  } catch {
+    return null;
+  }
+
+  if (!parsed.search && !parsed.hash) return null;
+  const isExactBackup = parsed.protocol === 'rtmp:'
+    && parsed.hostname === 'b.rtmp.youtube.com'
+    && parsed.port === ''
+    && parsed.pathname === '/live2'
+    && parsed.search === '?backup=1'
+    && parsed.searchParams.size === 1
+    && !parsed.hash
+    && !parsed.username
+    && !parsed.password;
+  if (!isExactBackup) {
+    throw new Error('Enter the exact YouTube backup server URL: rtmp://b.rtmp.youtube.com/live2?backup=1.');
+  }
+
+  const key = validateStreamKey(streamKey);
+  if (key !== validateStreamKey(primaryStreamKey)) {
+    throw new Error('The YouTube backup destination must use the primary stream key.');
+  }
+  return `${YOUTUBE_BACKUP_SERVER_URL}/${key}?backup=1`;
+}
+
+/**
+ * Build a primary output, an optional YouTube failover output, and concurrent
+ * secondary outputs. The backup is deliberately excluded from the tee list.
+ * @param {StreamConfiguration} [configuration]
+ */
+export function buildStreamDestinationPlan({
   rtmpServerUrl,
   streamKey,
   destinations = [],
   subscriptionTier = 'free',
 } = {}) {
-  const outputs = [buildRtmpDestination(rtmpServerUrl || DEFAULT_RTMP_SERVER_URL, streamKey)];
+  const primary = buildRtmpDestination(rtmpServerUrl || DEFAULT_RTMP_SERVER_URL, streamKey);
+  const primaryKey = validateStreamKey(streamKey);
+  const outputs = [primary];
+  let backup = null;
   const maximum = subscriptionTier === 'business' ? 4 : subscriptionTier === 'pro' ? 2 : 1;
 
   for (const destination of Array.isArray(destinations) ? destinations : []) {
@@ -87,33 +124,48 @@ export function buildStreamDestinations({
       throw new Error('Each enabled RTMP destination needs a server URL and a stream key.');
     }
 
+    const youtubeBackup = buildYoutubeBackupDestination(server, key, primaryKey);
+    if (youtubeBackup) {
+      if (backup && backup !== youtubeBackup) {
+        throw new Error('Only one YouTube backup destination can be enabled.');
+      }
+      backup = youtubeBackup;
+      continue;
+    }
+
     const output = buildRtmpDestination(server, key);
     if (!outputs.includes(output) && outputs.length < maximum) outputs.push(output);
   }
 
-  return outputs;
+  return { primary, backup, destinations: outputs };
+}
+
+/** @param {StreamConfiguration} [configuration] */
+export function buildStreamDestinations(configuration = {}) {
+  return buildStreamDestinationPlan(configuration).destinations;
+}
+
+/** Select the primary endpoint for one FFmpeg attempt; tee outputs stay stable. */
+export function selectStreamDestinationsForAttempt(plan, { useYoutubeBackup = false } = {}) {
+  if (!plan || !Array.isArray(plan.destinations) || typeof plan.primary !== 'string') {
+    throw new TypeError('A valid stream destination plan is required.');
+  }
+  const primary = useYoutubeBackup && plan.backup ? plan.backup : plan.primary;
+  return [primary, ...plan.destinations.slice(1)];
 }
 
 /** @param {StreamConfiguration} [configuration] */
 export function validateStreamConfiguration({ rtmpServerUrl, streamKey, stream_key, destinations = [] } = {}) {
+  const safeDestinations = Array.isArray(destinations) ? destinations : [];
   // Accept streamKey from top-level, or from destinations[0], or from stream_key (with underscore)
-  const actualStreamKey = streamKey || (destinations.length > 0 ? destinations[0].streamKey : stream_key);
+  const actualStreamKey = streamKey || (safeDestinations.length > 0 ? safeDestinations[0].streamKey : stream_key);
   // Accept rtmpServerUrl from top-level, or from destinations[0], or default
-  const actualRtmpServerUrl = rtmpServerUrl || (destinations.length > 0 ? destinations[0].rtmpServerUrl : undefined) || DEFAULT_RTMP_SERVER_URL;
+  const actualRtmpServerUrl = rtmpServerUrl || (safeDestinations.length > 0 ? safeDestinations[0].rtmpServerUrl : undefined) || DEFAULT_RTMP_SERVER_URL;
 
-  validateRtmpServerUrl(actualRtmpServerUrl);
-  validateStreamKey(actualStreamKey);
-
-  for (const destination of Array.isArray(destinations) ? destinations : []) {
-    if (!destination?.isEnabled) continue;
-    const server = typeof destination.rtmpServerUrl === 'string' ? destination.rtmpServerUrl.trim() : '';
-    const key = typeof destination.streamKey === 'string' ? destination.streamKey.trim() : '';
-    if (!server && !key) continue;
-    if (!server || !key) {
-      throw new Error('Each enabled RTMP destination needs a server URL and a stream key.');
-    }
-    validateRtmpServerUrl(server);
-    validateStreamKey(key);
-  }
+  buildStreamDestinationPlan({
+    rtmpServerUrl: actualRtmpServerUrl,
+    streamKey: actualStreamKey,
+    destinations: safeDestinations,
+  });
   return true;
 }

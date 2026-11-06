@@ -1,7 +1,10 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import { fileURLToPath } from 'node:url';
 import {defineConfig} from 'vite';
+
+const configDirectory = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig(() => {
   const apiTarget = process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:4000';
@@ -10,7 +13,7 @@ export default defineConfig(() => {
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(configDirectory, '.'),
       },
     },
     server: {
