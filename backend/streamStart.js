@@ -34,14 +34,6 @@ function normalizeAssetKeyForUrl(videoUrl) {
   }
 }
 
-function readJsonFile(filePath, fallback) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch {
-    return fallback;
-  }
-}
-
 function writeJsonFile(filePath, value) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2), 'utf8');

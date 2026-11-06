@@ -27,10 +27,24 @@ const UPLOADS_DIR = process.env.UPLOADS_DIR || path.resolve(__dirname, '../uploa
 const PAYMENT_SETTINGS_FILE = path.join(DATA_DIR, 'payment_settings.json');
 const SITE_CONTENT_FILE = path.join(DATA_DIR, 'site_content.json');
 const NOTIFICATIONS_FILE = path.join(DATA_DIR, 'notifications.json');
-const allowedOrigins = (process.env.CORS_ORIGINS || 'https://streempuls.mooo.com,https://www.streempuls.mooo.com,http://localhost:5173,http://127.0.0.1:5173')
+const configuredOrigins = [
+  process.env.CORS_ORIGINS,
+  process.env.R2_CORS_ALLOWED_ORIGINS,
+]
+  .filter(Boolean)
+  .join(',');
+const allowedOrigins = (configuredOrigins || 'https://streempuls.mooo.com,https://www.streempuls.mooo.com,http://localhost:5173,http://127.0.0.1:5173')
   .split(',')
   .map((origin) => origin.trim())
-  .filter(Boolean);
+  .flatMap((origin) => {
+    if (!origin || origin === '*') return origin ? [origin] : [];
+    try {
+      const parsed = new URL(origin);
+      return ['http:', 'https:'].includes(parsed.protocol) ? [parsed.origin] : [];
+    } catch {
+      return [];
+    }
+  });
 
 app.use(cors({
   origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)),
@@ -131,10 +145,18 @@ async function getR2Client() {
 }
 
 function getR2CorsOrigins() {
-  return (process.env.R2_CORS_ALLOWED_ORIGINS || process.env.CORS_ORIGINS || 'https://streempuls.mooo.com')
+  return (process.env.R2_CORS_ALLOWED_ORIGINS || process.env.CORS_ORIGINS || 'https://streempuls.mooo.com,https://www.streempuls.mooo.com,http://localhost:5173,http://127.0.0.1:5173')
     .split(',')
     .map((origin) => origin.trim())
-    .filter((origin) => origin && origin !== '*');
+    .flatMap((origin) => {
+      if (!origin || origin === '*') return [];
+      try {
+        const parsed = new URL(origin);
+        return ['http:', 'https:'].includes(parsed.protocol) ? [parsed.origin] : [];
+      } catch {
+        return [];
+      }
+    });
 }
 
 function readUsers() {
@@ -363,13 +385,21 @@ app.post('/api/storage/presigned-upload', async (req, res, next) => {
     if (typeof contentType !== 'string' || !/^(video|image)\/[a-z0-9.+-]+$/i.test(contentType)) {
       return res.status(400).json({ success: false, error: 'A valid video or image Content-Type is required.' });
     }
+    const uploadContentType = contentType.trim();
     if (fileSizeMb != null && (!Number.isFinite(Number(fileSizeMb)) || Number(fileSizeMb) <= 0 || Number(fileSizeMb) > 5000)) {
       return res.status(400).json({ success: false, error: 'fileSizeMb must be greater than 0 and no more than 5000 MB for a single PUT.' });
     }
     const requestOrigin = req.get('origin');
+    let normalizedRequestOrigin;
+    try {
+      normalizedRequestOrigin = requestOrigin ? new URL(requestOrigin).origin : undefined;
+    } catch {}
     const corsOrigins = getR2CorsOrigins();
-    if (requestOrigin && !corsOrigins.includes(requestOrigin)) {
-      return res.status(403).json({ success: false, error: 'This frontend origin is not allowed to upload directly to Cloudflare R2.' });
+    if (requestOrigin && (!normalizedRequestOrigin || !corsOrigins.includes(normalizedRequestOrigin))) {
+      return res.status(403).json({
+        success: false,
+        error: `Frontend origin '${requestOrigin}' is not allowed to request direct Cloudflare R2 uploads. Add its exact origin (scheme, host, and port) to R2_CORS_ALLOWED_ORIGINS, then configure the same origin in the R2 bucket CORS policy.`,
+      });
     }
 
     const { bucket } = getR2Configuration();
@@ -382,7 +412,7 @@ app.post('/api/storage/presigned-upload', async (req, res, next) => {
       key,
       ownerUserId: user.id,
       fileName: safeFileName,
-      contentType,
+      contentType: uploadContentType,
       status: 'pending',
       createdAt: new Date().toISOString(),
     });
@@ -395,7 +425,7 @@ app.post('/api/storage/presigned-upload', async (req, res, next) => {
     const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
     const uploadUrl = await getSignedUrl(
       client,
-      new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: contentType }),
+      new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: uploadContentType }),
       { expiresIn: ttl, signableHeaders: new Set(['content-type']) },
     );
 
@@ -407,11 +437,11 @@ app.post('/api/storage/presigned-upload', async (req, res, next) => {
       publicUrl,
       key,
       provider: 'r2',
-      headers: { 'Content-Type': contentType },
+      headers: { 'Content-Type': uploadContentType },
       expiresInSeconds: ttl,
       method: 'PUT',
       cors: {
-        allowedOrigin: requestOrigin || null,
+        allowedOrigin: normalizedRequestOrigin || null,
         allowedMethods: ['PUT'],
         allowedHeaders: ['Content-Type'],
       },

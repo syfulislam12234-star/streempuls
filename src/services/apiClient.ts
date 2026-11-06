@@ -542,6 +542,12 @@ export const apiClient = {
       throw new Error('The storage API did not return a direct HTTPS Cloudflare R2 upload URL.');
     }
 
+    const signedContentType = Object.entries(presigned.headers || {})
+      .find(([name]) => name.toLowerCase() === 'content-type')?.[1];
+    if (!signedContentType || signedContentType !== contentType) {
+      throw new Error('The presigned upload Content-Type does not match the selected file. Request a new upload URL and retry.');
+    }
+
     // 2. Send the File directly to R2 in one signed PUT; video bytes never go to Express.
     // Single-part PutObject supports up to 5 GB. This client does not use multipart.
     await new Promise<void>((resolve, reject) => {
@@ -549,12 +555,8 @@ export const apiClient = {
       xhr.open('PUT', uploadUrl.toString());
       xhr.withCredentials = false;
 
-      // Apply required headers (e.g. Content-Type)
-      if (presigned.headers) {
-        Object.entries(presigned.headers).forEach(([k, v]) => {
-          xhr.setRequestHeader(k, v);
-        });
-      }
+      // This value is part of the signature; send it verbatim and no extra headers.
+      xhr.setRequestHeader('Content-Type', signedContentType);
 
       if (onProgress && xhr.upload) {
         xhr.upload.onprogress = (event) => {

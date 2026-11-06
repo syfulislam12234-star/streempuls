@@ -37,12 +37,13 @@ async function waitForApi(api, baseUrl) {
   assert.fail('API did not become ready');
 }
 
-async function postJson(baseUrl, route, body, token) {
+async function postJson(baseUrl, route, body, token, origin) {
   return fetch(`${baseUrl}${route}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(origin ? { Origin: origin } : {}),
     },
     body: JSON.stringify(body),
   });
@@ -132,6 +133,7 @@ test('direct R2 upload, confirmation, private preview, and per-user asset isolat
       DATA_DIR: tempDir,
       NODE_ENV: 'test',
       CORS_ORIGINS: 'http://127.0.0.1',
+      R2_CORS_ALLOWED_ORIGINS: 'https://streempuls.mooo.com,https://www.streempuls.mooo.com,http://localhost:5173,http://127.0.0.1:5173',
       SUPABASE_URL: '',
       SUPABASE_SERVICE_ROLE_KEY: '',
       CLOUDFLARE_R2_ACCOUNT_ID: '0123456789abcdef0123456789abcdef',
@@ -154,6 +156,16 @@ test('direct R2 upload, confirmation, private preview, and per-user asset isolat
 
   const baseUrl = `http://127.0.0.1:${apiPort}`;
   await waitForApi(api, baseUrl);
+  const apiPreflight = await fetch(`${baseUrl}/api/storage/presigned-upload`, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: 'https://streempuls.mooo.com',
+      'Access-Control-Request-Method': 'POST',
+      'Access-Control-Request-Headers': 'authorization,content-type',
+    },
+  });
+  assert.equal(apiPreflight.status, 204);
+  assert.equal(apiPreflight.headers.get('access-control-allow-origin'), 'https://streempuls.mooo.com');
   const { userId: ownerUserId, credentials: ownerCredentials } = await registerUser(baseUrl, 'owner');
   const { credentials: otherCredentials } = await registerUser(baseUrl, 'other');
   const savedUsers = JSON.parse(fs.readFileSync(path.join(tempDir, 'users.json'), 'utf8'));
@@ -200,16 +212,24 @@ test('direct R2 upload, confirmation, private preview, and per-user asset isolat
   assert.equal((await fetch(`${baseUrl}/api/uploads`)).status, 401);
   assert.equal((await postJson(baseUrl, '/api/storage/preview-url', { videoUrl: 'https://example.test/video.mp4' })).status, 401);
 
-  const presignResponse = await postJson(baseUrl, '/api/storage/presigned-upload', {
+  const presignPayload = {
     fileName: 'owner-video.mp4',
     contentType: 'video/mp4',
     fileSizeMb: 0.1,
     preferredProvider: 'r2',
-  }, ownerToken);
+  };
+  const deniedPresignResponse = await postJson(baseUrl, '/api/storage/presigned-upload', presignPayload, ownerToken, 'https://unlisted.example');
+  assert.equal(deniedPresignResponse.status, 403);
+  assert.match((await deniedPresignResponse.json()).error, /R2_CORS_ALLOWED_ORIGINS/);
+
+  const presignResponse = await postJson(baseUrl, '/api/storage/presigned-upload', presignPayload, ownerToken, 'https://streempuls.mooo.com');
   assert.equal(presignResponse.status, 200);
   const presign = await presignResponse.json();
   assert.equal(presign.provider, 'r2');
   assert.match(presign.key, /^media\//);
+  assert.deepEqual(presign.headers, { 'Content-Type': 'video/mp4' });
+  assert.match(new URL(presign.uploadUrl).searchParams.get('X-Amz-SignedHeaders'), /(^|;)content-type(;|$)/);
+  assert.equal(presign.cors.allowedOrigin, 'https://streempuls.mooo.com');
 
   const videoBytes = Buffer.from('fake-mp4-header: ftyp; owner-scoped upload test');
   const putResponse = await fetch(presign.uploadUrl, {
