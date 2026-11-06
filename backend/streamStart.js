@@ -1,6 +1,7 @@
 import { withRedisLease } from './redisLease.js';
 import { reconcileUserStreamsForStart } from './streamOwnership.js';
 import { countActiveStreams } from './streamQuota.js';
+import { getSignedStorageUrl } from './supabase.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +9,30 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
 const STREAMS_FILE = path.join(DATA_DIR, 'streams.json');
+const UPLOADED_ASSETS_FILE = path.join(DATA_DIR, 'uploaded_assets.json');
+
+function readJsonFile(filePath, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function readUploadedAssets() {
+  const assets = readJsonFile(UPLOADED_ASSETS_FILE, []);
+  return Array.isArray(assets) ? assets : [];
+}
+
+function normalizeAssetKeyForUrl(videoUrl) {
+  if (!videoUrl) return '';
+  try {
+    const url = new URL(videoUrl);
+    return decodeURIComponent(url.pathname.replace(/^\/+/, ''));
+  } catch {
+    return videoUrl.replace(/^\/+/, '');
+  }
+}
 
 function readJsonFile(filePath, fallback) {
   try {
@@ -96,6 +121,42 @@ if (stream && stream.status === 'starting') {
     }
     if (!stream.video_url || !stream.stream_key) return { kind: 'invalid-stream' };
 
+    // -----------------------------------------------------------------------
+    // Video readiness gate: live streaming is stream-copy (-c copy) only.
+    // A video may go live only after upload-time normalization has finished
+    // and the normalized object exists in storage. Otherwise the stream is
+    // refused with video_not_ready so the UI shows a "Processing" state.
+    // -----------------------------------------------------------------------
+    const assets = readUploadedAssets();
+    const assetKey = normalizeAssetKeyForUrl(stream.video_url);
+    const asset = assets.find(
+      (a) => (assetKey && a.key === assetKey) || a.url === stream.video_url || a.publicUrl === stream.video_url
+    );
+    let startVideoUrl = stream.video_url;
+    if (asset) {
+      if (asset.normalization_status !== 'ready') {
+        return {
+          kind: 'video_not_ready',
+          status: 'needs_processing',
+          reason: asset.normalization_status || 'pending',
+          error: asset.normalization_error || null,
+          normalized: Boolean(asset.normalized),
+          normalized_object_key: asset.normalized_object_key || null,
+        };
+      }
+      if (asset.normalized_object_key) {
+        try {
+          // Stream exclusively from the normalized object; keep the existing
+          // R2/Supabase -> local cache -> FFmpeg input flow in the worker.
+          startVideoUrl = await getSignedStorageUrl(asset.normalized_object_key, 3600);
+        } catch {
+          // If signing fails, keep the original URL; the worker's pre-flight
+          // probe will still refuse any input that is not normalized.
+          startVideoUrl = stream.video_url;
+        }
+      }
+    }
+
     if (ACTIVE_STREAM_STATUSES.has(String(stream.status).toLowerCase())) {
       return { kind: 'already-running', status: stream.status };
     }
@@ -162,7 +223,7 @@ if (stream && stream.status === 'starting') {
 
     const job = await queue.add('start-stream', {
       streamId: stream.id,
-      videoUrl: stream.video_url,
+      videoUrl: startVideoUrl,
       streamKey: stream.stream_key,
       rtmpServerUrl: stream.rtmp_server_url,
       destinations: stream.destinations,

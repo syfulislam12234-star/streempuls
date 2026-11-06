@@ -3,6 +3,7 @@ const STREAM_COLUMNS = [
   'is_looping', 'direct_copy_mode', 'status', 'ffmpeg_pid', 'worker_node_id', 'last_heartbeat',
   'uptime_seconds', 'current_bitrate_kbps', 'fps', 'cpu_usage_pct', 'mem_usage_mb', 'last_error',
   'logs', 'last_started_at', 'last_stopped_at', 'created_at', 'updated_at',
+  'normalized', 'normalization_status', 'normalized_object_key', 'normalization_error',
 ];
 const DESTINATION_PLATFORMS = new Set(['youtube', 'twitch', 'kick', 'custom']);
 

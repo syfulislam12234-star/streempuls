@@ -38,11 +38,70 @@ import { stopStreamsThenClose } from './workerShutdown.js';
 import { terminateChildAndWait, terminateChildAndReleaseCache, scheduleRestartAfterExit } from './ffmpegLifecycle.js';
 import { getCacheFallbackReason, retryCachePreparation } from './cacheFallback.js';
 import { downloadVideoToLocalFile, resolveLocalUpload } from './localVideoSource.js';
-import { directCopyIneligibility, parseFfmpegProgressRecord, probeFfmpegVideoMetadata, readProcessMemoryMb, sampleProcessCpuPercent } from './ffmpegProgress.js';
+import { parseFfmpegProgressRecord, probeFfmpegVideoMetadata, sampleProcessCpuPercent, validateLiveCopyProfile } from './ffmpegProgress.js';
+
+// Thrown by launchFfmpegStream when the cached input does not match the strict
+// live-stream direct-copy profile. Caught by the worker processor (not retried):
+// the stream is refused, the video is marked "needs_processing"/video_not_ready,
+// and normalization at upload time is responsible for clearing the state.
+class VideoNotReadyError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'VideoNotReadyError';
+    this.code = 'VIDEO_NOT_READY';
+  }
+}
+
+/**
+ * Build the strict live stream-copy FFmpeg argument vector.
+ *
+ * The live path is stream-copy ONLY: no -vf, no libx264, no -c:a aac, no
+ * scale/pad/fps filters. The command shape is exactly:
+ *   ffmpeg -re -stream_loop -1 -i <local cached file> -c copy
+ *         -flvflags no_duration_filesize -f flv <rtmp url>
+ *
+ * @param {object} opts
+ * @param {string} opts.inputSource - local cached file path (or direct URL).
+ * @param {string[]} opts.destinations - RTMP output URLs.
+ * @param {boolean} [opts.isHttpSource] - true when input is a remote HTTP(S) URL
+ *   (enables -reconnect flags for R2/CDN socket drops).
+ * @returns {string[]} ffmpeg arguments after the '-i <source file>' position.
+ */
+export function buildLiveFfmpegArgs({ inputSource, destinations, isHttpSource = false }) {
+  const ffmpegArgs = ['-re', '-stream_loop', '-1'];
+  if (isHttpSource) {
+    ffmpegArgs.push(
+      '-reconnect', '1',
+      '-reconnect_at_eof', '1',
+      '-reconnect_streamed', '1',
+      '-reconnect_delay_max', '5',
+      '-timeout', '15000000',
+    );
+  }
+  ffmpegArgs.push(
+    '-rtbufsize', '1024M',
+    '-i', inputSource,
+    '-fflags', '+nobuffer',
+    '-flags', '+low_delay',
+    '-muxdelay', '0.1',
+    '-progress', 'pipe:1',
+    '-nostats',
+    '-c', 'copy',
+  );
+  const activeDestinations = Array.isArray(destinations) ? destinations : [];
+  if (activeDestinations.length === 1) {
+    ffmpegArgs.push('-flvflags', 'no_duration_filesize', '-f', 'flv', activeDestinations[0]);
+  } else if (activeDestinations.length > 1) {
+    // Multi-destination tee: each output is a copy-only FLV muxer.
+    const teeOutputString = activeDestinations
+      .map((url) => '[f=flv:onfail=ignore]' + url)
+      .join('|');
+    ffmpegArgs.push('-flags', '+global_header', '-f', 'tee', teeOutputString);
+  }
+  return ffmpegArgs;
+}
 
 dotenv.config();
-const DIRECT_COPY_ENABLED = process.env.DIRECT_COPY_ENABLED !== 'false';
-
 // ----------------------------------------------------------------------------
 // Worker Node Identity & Capacity Configuration
 // ----------------------------------------------------------------------------
@@ -92,13 +151,10 @@ function redactUrlQuery(value) {
   }
 }
 
-function probeDirectCopyEligibility(source) {
-  return probeFfmpegVideoMetadata(source)
-    .then((metadata) => {
-      const reason = directCopyIneligibility(metadata);
-      return { eligible: !reason, reason, metadata };
-    })
-    .catch((error) => ({ eligible: false, reason: error?.message?.includes('timed out') ? 'ffprobe-timeout' : 'ffprobe-error', metadata: null }));
+async function probeDirectCopyEligibility(source) {
+  const metadata = await probeFfmpegVideoMetadata(source);
+  const reason = validateLiveCopyProfile(metadata);
+  return { eligible: !reason, reason, metadata };
 }
 
 /**
@@ -309,8 +365,6 @@ async function launchFfmpegStream(job, lease, abortSignal) {
     let ffmpegStartSequence = 0;
     let telemetryUpdateCount = 0;
     let telemetrySequence = 0;
-    let copyFallbackAttempted = false;
-    let forceTranscode = false;
     const isVertical = orientation === 'vertical';
     const recentFfmpegDiagnostics = [];
     let leaseLostError = null;
@@ -661,70 +715,78 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         '-nostats'
       );
 
-      let copyEligibility = { eligible: false, reason: null, metadata: null };
-      if (forceTranscode) {
-        copyEligibility.reason = 'copy-fallback';
-      } else if (directCopyMode === false) {
-        copyEligibility.reason = 'direct-copy-mode-disabled';
-      } else if (!DIRECT_COPY_ENABLED) {
-        copyEligibility.reason = 'direct-copy-disabled-by-environment';
-      } else {
-        copyEligibility = r2CachedMetadata
-          ? { eligible: !directCopyIneligibility(r2CachedMetadata), reason: directCopyIneligibility(r2CachedMetadata), metadata: r2CachedMetadata }
-          : await probeDirectCopyEligibility(inputSource);
+      // STRICT LIVE PATH: -c copy only. The cached input is probed once (fast
+      // ffprobe) and must match the normalized live profile exactly:
+      //   h264 / 1080x1920 / 30 fps / yuv420p / ~2s keyframe interval /
+      //   AAC 44100 Hz stereo
+      // There is no live transcode fallback: libx264, scale, pad and fps
+      // filters are deleted from this path entirely. If the video is not
+      // eligible, the stream is refused with video_not_ready and the UI shows
+      // a "Processing" state until normalization completes.
+      let inputProfile = null;
+      try {
+        inputProfile = await probeFfmpegVideoMetadata(inputSource);
+      } catch (error) {
+        const message = error?.message || 'unknown';
+        inputProfile = { codecName: null, width: null, height: null, rFrameRate: null, bitrate: null, durationSeconds: null, keyframeIntervalSeconds: null, pixFmt: null, audioCodec: null, audioSampleRate: null, audioChannels: null, error: true };
+        console.warn(`[FFmpeg Engine] Stream ${streamId}: ffprobe of cached input failed: ${message}`);
       }
-      if (copyEligibility.eligible && copyEligibility.metadata
-        && isVertical !== (copyEligibility.metadata.height > copyEligibility.metadata.width)) {
-        copyEligibility.eligible = false;
-        copyEligibility.reason = 'orientation-mismatch';
+      const profileReason = validateLiveCopyProfile(inputProfile);
+      const orientationOk = inputProfile.height === 1920 && inputProfile.width === 1080
+        && (!inputProfile.height || isVertical === (inputProfile.height > inputProfile.width));
+      const useDirectCopy = !profileReason && orientationOk;
+
+      if (!useDirectCopy) {
+        // Mark the video as not-ready ("needs_processing") and refuse the
+        // stream start. The upload-time normalization job will clear this
+        // state; the stream is NOT started and no transcode is attempted.
+        const reason = profileReason || 'orientation-mismatch';
+        try {
+          await updateOwnedStream({
+            status: 'idle',
+            ffmpeg_pid: null,
+            last_error: 'video_not_ready: ' + reason,
+            updated_at: new Date().toISOString(),
+          }, true).catch(() => {});
+          try {
+            await redisClient.publish('stream-telemetry-events', JSON.stringify({
+              streamId,
+              status: 'idle',
+              health_status: 'warning',
+              video_mode: 'stream-copy (no encode/decode)',
+              transcode_reason: null,
+              transcript: null,
+              timestamp: new Date().toISOString(),
+            }));
+            await redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
+              streamId,
+              status: 'idle',
+              health_status: 'warning',
+              video_mode: 'stream-copy (no encode/decode)',
+              transcode_reason: null,
+              transcript: null,
+              timestamp: new Date().toISOString(),
+            }));
+          } catch {}
+        } catch (e) {
+          console.error('[FFmpeg Engine] Stream ' + streamId + ': failed to record video_not_ready state:', e?.message || e);
+        }
+        throw new VideoNotReadyError('video_not_ready: ' + reason + ' - video needs processing (normalization) before it can go live.');
       }
-      const useDirectCopy = copyEligibility.eligible && !forceTranscode;
 
       if (streamStartController.signal.aborted || isTerminated || streamController.isIntentionalStop) {
         await releaseCachedR2Source();
         return;
       }
 
-      if (useDirectCopy) {
-        ffmpegArgs.push(
-          '-c:v', 'copy',
-          '-c:a', 'aac',
-          '-b:a', '128k',
-          '-ar', '44100'
-        );
-      } else if (isVertical) {
-        ffmpegArgs.push(
-          '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
-          '-c:v', 'libx264',
-          '-preset', 'veryfast',
-          '-tune', 'zerolatency',
-          '-b:v', '4500k',
-          '-maxrate', '5000k',
-          '-bufsize', '9000k',
-          '-pix_fmt', 'yuv420p',
-          '-g', '60',
-          '-c:a', 'aac',
-          '-b:a', '128k',
-          '-ar', '44100'
-        );
-      } else {
-        ffmpegArgs.push(
-          '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black',
-          '-c:v', 'libx264',
-          '-preset', 'veryfast',
-          '-tune', 'zerolatency',
-          '-b:v', '6000k',
-          '-maxrate', '6500k',
-          '-bufsize', '12000k',
-          '-pix_fmt', 'yuv420p',
-          '-g', '60',
-          '-c:a', 'aac',
-          '-b:a', '160k',
-          '-ar', '44100'
-        );
-      }
-
-      if (activeDestinations.length === 1) {
+      // Strict stream-copy: no encoding, no decoding, no filters of any kind.
+      // -c copy duplicates H.264/AAC packets directly into the FLV muxer.
+      const currentProcessSequence = ++ffmpegStartSequence;
+      telemetryUpdateCount = 0;
+      telemetrySequence = 0;
+      const isHttpSource = inputSource.startsWith('http://') || inputSource.startsWith('https://');
+      const liveFfmpegArgs = buildLiveFfmpegArgs({ inputSource, destinations: activeDestinations, isHttpSource });
+      currentChild = spawn('ffmpeg', liveFfmpegArgs);
         ffmpegArgs.push(
           '-flvflags', 'no_duration_filesize',
           '-f', 'flv',
@@ -747,36 +809,18 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       const currentProcessSequence = ++ffmpegStartSequence;
       telemetryUpdateCount = 0;
       telemetrySequence = 0;
-      if (useDirectCopy) {
-        console.log('[FFmpeg Mode] copy');
-      } else {
-        console.log('[FFmpeg Mode] transcode (' + (isVertical ? 'vertical' : 'landscape') + ') reason=' + copyEligibility.reason);
-      }
-      const attemptUsedDirectCopy = useDirectCopy;
-      const attemptStartedAt = Date.now();
-      let fallbackScheduled = false;
+      console.log('[FFmpeg Mode] stream-copy (no encode/decode)');
+
       let childErrorHandled = false;
       let progressBuffer = '';
       let progressRecord = [];
       let processCpuSample = null;
       let previousOutputTime = null;
       let previousProgressFrame = null;
-      let lastOutputAdvanceAt = attemptStartedAt;
+      let lastOutputAdvanceAt = Date.now();
       let lastProgressMetricsWriteAt = 0;
       let previousDroppedFrames = 0;
       let stallRecoveryStarted = false;
-      const startCopyFallback = () => {
-        if (!attemptUsedDirectCopy || copyFallbackAttempted || rtmpConfirmed
-          || streamController.isIntentionalStop || isTerminated) return false;
-        copyFallbackAttempted = true;
-        forceTranscode = true;
-        fallbackScheduled = true;
-        if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-        if (progressWatchdogTimer) { clearInterval(progressWatchdogTimer); progressWatchdogTimer = null; }
-        console.warn('[FFmpeg Mode] copy failed, falling back to transcode');
-        void startFfmpegProcess();
-        return true;
-      };
       currentChild = spawn('ffmpeg', ffmpegArgs);
       const pid = currentChild.pid;
 
@@ -790,7 +834,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         const recoverAfterExit = () => {
           if (recoveryHandled || (failedChild.exitCode == null && failedChild.signalCode == null)) return;
           recoveryHandled = true;
-          if (!startCopyFallback()) return handleProcessCrash(err, null, null);
+          void handleProcessCrash(err, null, null);
         };
         void terminateFfmpegChild(failedChild).then((stopped) => {
           if (stopped) recoverAfterExit();
@@ -868,13 +912,19 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           ? null
           : Math.max(0, progress.droppedFrames - previousDroppedFrames);
         if (progress.droppedFrames !== null) previousDroppedFrames = progress.droppedFrames;
+        // CPU is the FFmpeg process usage as a percent of ONE core
+        // (docker-stats convention: 100% = 1 fully-used core) sampled from the
+        // real ffmpeg PID (/proc/<pid>/stat), never a container average.
+        const cpuPercentOfOneCore = cpuSample.cpuPercent === null
+          ? null
+          : +cpuSample.cpuPercent.toFixed(2);
         const telemetryPayload = {
           streamId,
           status: rtmpConfirmed ? 'live' : 'starting',
           ...(progress.bitrateKbps !== null ? { bitrate_kbps: progress.bitrateKbps } : {}),
           ...(progress.fps !== null ? { fps: progress.fps } : {}),
           ...(progress.droppedFrames !== null ? { dropped_frames: progress.droppedFrames } : {}),
-          ...(cpuSample.cpuPercent !== null ? { cpu_usage_pct: +cpuSample.cpuPercent.toFixed(2) } : {}),
+          ...(cpuSample.cpuPercent !== null ? { cpu_usage_pct: cpuPercentOfOneCore } : {}),
           ...(ffmpegMemoryMb !== null ? { mem_usage_mb: ffmpegMemoryMb } : {}),
           speed: progress.speed === null ? null : `${progress.speed.toFixed(2)}x`,
           output_time_seconds: progress.outputTimeSeconds,
@@ -882,14 +932,16 @@ async function launchFfmpegStream(job, lease, abortSignal) {
             ? null
             : +(uptimeSeconds - progress.outputTimeSeconds).toFixed(2),
           health_status: droppedDelta > 0 ? 'warning' : 'good',
-          video_mode: attemptUsedDirectCopy ? 'copy' : 'transcode',
-          transcode_reason: attemptUsedDirectCopy ? null : copyEligibility.reason,
+          // Live path is strict stream-copy: no encode/decode, no transcode.
+          video_mode: 'stream-copy (no encode/decode)',
+          transcode_reason: null,
           uptime_seconds: uptimeSeconds,
           destinations_count: activeDestinations.length,
           reconnect_attempts: reconnectAttempts,
           ...cacheTelemetry,
           ffmpegStartSequence: currentProcessSequence,
           sequence: ++telemetrySequence,
+          alerts,
           timestamp: new Date(now).toISOString(),
         };
 
@@ -925,6 +977,14 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         }
       };
 
+      // Speed (< 0.95x) and growing output-delay alerts: they indicate the
+      // stream-copy pipeline can no longer keep real-time pace (network,
+      // cached-input eviction, source degradation).
+      let delayGrowingCount = 0;
+      let lastDelaySeconds = null;
+      const speedAlerts = new Set();
+      const delayAlerts = new Set();
+
       currentChild.stdout?.on('data', (chunk) => {
         progressBuffer += chunk.toString();
         if (progressBuffer.length > 64 * 1024) progressBuffer = progressBuffer.slice(-16 * 1024);
@@ -940,8 +1000,56 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         }
       });
 
-      // Independent heartbeat: keep last_heartbeat fresh in Supabase even when
-      // FFmpeg stderr is silent, so a stale owner cannot steal the stream.
+      const handleProgressRecord = async (record) => {
+        if (currentProcessSequence !== ffmpegStartSequence || !record.trim()) return;
+        const progress = parseFfmpegProgressRecord(record);
+        const now = Date.now();
+        const outputTimeAdvanced = progress.outputTimeSeconds !== null
+          && (previousOutputTime === null || Math.abs(progress.outputTimeSeconds - previousOutputTime) > 0.001);
+        const frameAdvanced = progress.frame !== null
+          && (previousProgressFrame === null || progress.frame > previousProgressFrame);
+        if (outputTimeAdvanced || frameAdvanced) {
+          if (progress.outputTimeSeconds !== null) previousOutputTime = progress.outputTimeSeconds;
+          if (progress.frame !== null) previousProgressFrame = progress.frame;
+          lastOutputAdvanceAt = now;
+          if (!rtmpConfirmed) telemetryUpdateCount++;
+        }
+
+        const cpuSample = await sampleProcessCpuPercent(pid, processCpuSample);
+        processCpuSample = cpuSample.sample;
+        const ffmpegMemoryMb = await readProcessMemoryMb(pid);
+        const uptimeSeconds = Math.max(0, Math.floor((now - processStartedAt) / 1000));
+        const droppedDelta = progress.droppedFrames === null
+          ? null
+          : Math.max(0, progress.droppedFrames - previousDroppedFrames);
+        if (progress.droppedFrames !== null) previousDroppedFrames = progress.droppedFrames;
+
+        // ---- live-path alerts: speed below 0.95x or output delay growing ----
+        const alerts = [];
+        if (progress.speed !== null && progress.speed < 0.95) {
+          if (!speedAlerts.has(progress.speed)) {
+            speedAlerts.add(progress.speed);
+            console.warn(`[FFmpeg Watchdog] Stream ${streamId}: output speed ${progress.speed.toFixed(2)}x is below 0.95x - the copy pipeline is starved (input/page cache, network or source degradation).`);
+          }
+          alerts.push('ffmpeg-speed-below-0.95x');
+        }
+        if (progress.outputTimeSeconds !== null) {
+          const delaySeconds = +(uptimeSeconds - progress.outputTimeSeconds).toFixed(2);
+          if (lastDelaySeconds !== null && delaySeconds > lastDelaySeconds + 1.0) {
+            delayGrowingCount += 1;
+            if (delayGrowingCount >= 3) {
+              const key = 'playback-delay-growing';
+              if (!delayAlerts.has(key)) {
+                delayAlerts.add(key);
+                console.warn(`[FFmpeg Watchdog] Stream ${streamId}: output delay has grown for 3 consecutive telemetry samples (> 1s per sample) - falling behind real-time.`);
+              }
+              alerts.push(key);
+            }
+          } else {
+            delayGrowingCount = 0;
+          }
+          lastDelaySeconds = delaySeconds;
+        }
       const HEARTBEAT_INTERVAL_MS = 5000;
       const refreshHeartbeat = async () => {
         if ((isTerminated || streamController.isIntentionalStop)
@@ -977,7 +1085,6 @@ async function launchFfmpegStream(job, lease, abortSignal) {
 
       currentChild.on('exit', async (code, signal) => {
         if (leaseLostError || childErrorHandled) return;
-        if (startCopyFallback()) return;
         if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
         if (progressWatchdogTimer) { clearInterval(progressWatchdogTimer); progressWatchdogTimer = null; }
 

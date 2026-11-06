@@ -196,6 +196,10 @@ CREATE TABLE IF NOT EXISTS public.streams (
   thumbnail_url TEXT,
   visibility VARCHAR(20) NOT NULL DEFAULT 'public',
   scheduled_for TIMESTAMPTZ,
+  normalized BOOLEAN NOT NULL DEFAULT FALSE,
+  normalization_status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  normalized_object_key TEXT,
+  normalization_error TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

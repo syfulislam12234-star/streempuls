@@ -12,6 +12,7 @@ import { validateStreamConfiguration } from './streamDestinations.js';
 import { ensureStreamRecord, StreamPersistenceError } from './streamPersistence.js';
 import { authenticateBearerToken, createStreamAuthMiddleware, getAccessibleStreams, getAuthorizedStream, isStreamAdmin, upsertUserToSupabase } from './streamAccess.js';
 import { enqueueStreamStart } from './streamStart.js';
+import { redisClient, streamQueue, normalizeQueue } from './queue.js';
 import { supabase, SUPABASE_ADMIN_CONFIGURED } from './supabase.js';
 
 const app = express();
@@ -235,6 +236,22 @@ function broadcastStreamTelemetry(streamId, payload) {
 function readUploadedAssets() {
   const assets = readJsonFile(UPLOADED_ASSETS_FILE, []);
   return Array.isArray(assets) ? assets : [];
+}
+
+/**
+ * Inherit upload-time normalization state for a stream's video. A stream may
+ * only go live from its normalized object (live is stream-copy only).
+ */
+function normalizationFieldsForVideo(videoUrl) {
+  const assets = readUploadedAssets();
+  const asset = assets.find((a) => a.url === videoUrl || a.publicUrl === videoUrl);
+  if (!asset) return {};
+  return {
+    normalized: Boolean(asset.normalized),
+    normalization_status: asset.normalization_status || 'pending',
+    normalized_object_key: asset.normalized_object_key || null,
+    normalization_error: asset.normalization_error || null,
+  };
 }
 
 function getR2PublicObjectUrl(key) {
@@ -464,6 +481,33 @@ app.post('/api/storage/confirm-upload', async (req, res, next) => {
     assets[assetIndex] = asset;
     writeJsonFile(UPLOADED_ASSETS_FILE, assets);
 
+// --- Upload-time normalization: enqueue the one-time heavy transcode ---
+// The live path is stream-copy (-c copy) only, so a video can go live only
+// after it has been normalized to the live profile at upload time.
+try {
+  if (!asset.normalization_status || asset.normalization_status === 'pending') {
+    asset.normalization_status = 'pending';
+    asset.normalized = false;
+    asset.updatedAt = new Date().toISOString();
+  }
+  if (asset.normalization_status !== 'ready' && asset.normalization_status !== 'processing') {
+    writeJsonFile(UPLOADED_ASSETS_FILE, assets);
+    void normalizeQueue.add(
+      'normalize-video',
+      {
+        sourceUrl: asset.url,
+        objectKey: key,
+        assetKey: key,
+        userId: user.id,
+      },
+      { jobId: `normalize-${key}` }
+    );
+  }
+} catch (error) {
+  // Never fail a confirmed upload because normalization could not be queued.
+  console.error('[Confirm Upload] Normalization job could not be queued:', error.message);
+}
+
     const {
       ownerUserId: _ownerUserId,
       status: _status,
@@ -503,6 +547,11 @@ app.get('/api/uploads', async (req, res, next) => {
       codec: asset.codec,
       titleSuggestion: asset.titleSuggestion,
       createdAt: asset.createdAt,
+      // Upload-time normalization state (live is stream-copy only).
+      normalization_status: asset.normalization_status || null,
+      normalized: Boolean(asset.normalized),
+      normalized_object_key: asset.normalized_object_key || null,
+      normalization_error: asset.normalization_error || null,
     })));
     return res.status(200).json({ success: true, assets: responseAssets });
   } catch (error) {
@@ -855,6 +904,10 @@ app.post('/api/streams', (req, res, next) => {
       title: payload.title.trim().slice(0, 100),
       description: typeof payload.description === 'string' ? payload.description.slice(0, 500) : '',
       video_url: payload.video_url.trim(),
+      // Stream exclusively from the normalized object. Live is stream-copy
+      // (-c copy) only: un-normalized videos cannot go live and show
+      // "Processing" until upload-time normalization finishes.
+      ...normalizationFieldsForVideo(payload.video_url.trim()),
       stream_key: payload.stream_key.trim(),
       destinations: payload.destinations.slice(0, destinationLimit),
       user_id: userId || user?.id || null,
@@ -1014,6 +1067,18 @@ app.post('/api/streams/:id/start', async (req, res, next) => {
     }
     if (result.kind === 'request-in-progress') {
       return res.status(409).json({ success: false, error: 'A start request for this stream is already being processed.' });
+    }
+    if (result.kind === 'video_not_ready') {
+      return res.status(409).json({
+        success: false,
+        error: 'Video is not ready for live streaming. It is being processed (normalization) and cannot go live until completed.',
+        code: 'video_not_ready',
+        needs_processing: true,
+        processing_status: result.status,
+        processing_reason: result.reason,
+        normalized: result.normalized,
+        normalized_object_key: result.normalized_object_key || null,
+      });
     }
     if (result.kind === 'plan-limit-exceeded') {
       return res.status(403).json({

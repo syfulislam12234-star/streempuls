@@ -54,10 +54,9 @@ export function probeFfmpegVideoMetadata(source, { timeoutMs = 20_000 } = {}) {
     try {
       child = spawn('ffprobe', [
         '-v', 'error',
-        '-select_streams', 'v:0',
         '-read_intervals', '%+10',
         '-show_packets',
-        '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,bit_rate:format=duration:packet=pts_time,flags',
+        '-show_entries', 'stream=codec_type,codec_name,width,height,r_frame_rate,bit_rate,pix_fmt,sample_rate,channels:format=duration:packet=pts_time,flags',
         '-of', 'json',
         source,
       ], { stdio: ['ignore', 'pipe', 'ignore'] });
@@ -86,6 +85,7 @@ export function probeFfmpegVideoMetadata(source, { timeoutMs = 20_000 } = {}) {
       try {
         const result = JSON.parse(output);
         const video = result.streams?.find((stream) => stream.codec_type === 'video');
+        const audio = result.streams?.find((stream) => stream.codec_type === 'audio');
         const width = Number(video?.width);
         const height = Number(video?.height);
         const duration = Number(result.format?.duration);
@@ -110,6 +110,10 @@ export function probeFfmpegVideoMetadata(source, { timeoutMs = 20_000 } = {}) {
           bitrate: Number.isFinite(Number(video.bit_rate)) ? Number(video.bit_rate) : null,
           durationSeconds: duration,
           keyframeIntervalSeconds,
+          pixFmt: video.pix_fmt || null,
+          audioCodec: audio?.codec_name || null,
+          audioSampleRate: audio?.sample_rate ? Number(audio.sample_rate) : null,
+          audioChannels: audio?.channels ? Number(audio.channels) : null,
         });
       } catch {
         finish(new Error('Video metadata output is invalid.'));
@@ -136,6 +140,29 @@ export function directCopyIneligibility(metadata) {
     || metadata.keyframeIntervalSeconds <= 0 || metadata.keyframeIntervalSeconds > 2.5) {
     return 'keyframe-interval-over-2.5s-or-unknown';
   }
+  return null;
+}
+
+/**
+ * Strict live-stream direct-copy profile. A video may only go live with
+ * stream-copy (-c copy) when it has already been normalized at upload time to
+ * this exact profile. Nothing is transcoded live.
+ */
+export function validateLiveCopyProfile(metadata) {
+  if (!metadata) return 'metadata-unavailable';
+  if (metadata.codecName !== 'h264') return 'codec-not-h264';
+  if (metadata.width !== 1080 || metadata.height !== 1920) return 'resolution-not-1080x1920';
+  const [numerator, denominator] = String(metadata.rFrameRate || '').split('/').map(Number);
+  const fps = denominator ? numerator / denominator : Number(metadata.rFrameRate);
+  if (!Number.isFinite(fps) || fps !== 30) return 'fps-not-30';
+  if (metadata.pixFmt !== 'yuv420p') return 'pix-fmt-not-yuv420p';
+  if (!Number.isFinite(metadata.keyframeIntervalSeconds)
+    || metadata.keyframeIntervalSeconds < 1.5 || metadata.keyframeIntervalSeconds > 2.5) {
+    return 'keyframe-interval-not-2-seconds';
+  }
+  if (metadata.audioCodec !== 'aac') return 'audio-codec-not-aac';
+  if (metadata.audioSampleRate !== 44100) return 'audio-sample-rate-not-44100-hz';
+  if (metadata.audioChannels !== 2) return 'audio-not-stereo';
   return null;
 }
 
