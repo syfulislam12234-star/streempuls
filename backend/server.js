@@ -1,4 +1,3 @@
-
 import express from 'express';
 import { createServer } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -212,6 +211,26 @@ function getAuthenticatedUser(req) {
 }
 
 const requireStreamAuthentication = createStreamAuthMiddleware();
+const telemetrySubscribers = new Map();
+
+function subscribeToStreamTelemetry(streamId, callback) {
+  let subscribers = telemetrySubscribers.get(streamId);
+  if (!subscribers) {
+    subscribers = new Set();
+    telemetrySubscribers.set(streamId, subscribers);
+  }
+  subscribers.add(callback);
+  return () => {
+    subscribers.delete(callback);
+    if (subscribers.size === 0) telemetrySubscribers.delete(streamId);
+  };
+}
+
+function broadcastStreamTelemetry(streamId, payload) {
+  for (const callback of telemetrySubscribers.get(streamId) || []) {
+    try { callback(payload); } catch {}
+  }
+}
 
 function readUploadedAssets() {
   const assets = readJsonFile(UPLOADED_ASSETS_FILE, []);
@@ -1063,15 +1082,83 @@ app.get('/api/streams/:id/telemetry', (req, res) => {
     telemetry: {
       bitrate_kbps: stream.current_bitrate_kbps || 0,
       fps: stream.fps || 0,
-      dropped_frames: 0,
-      cpu_usage_pct: stream.cpu_usage_pct || 0,
-      mem_usage_mb: stream.mem_usage_mb || 0,
-      health_status: stream.status === 'live' ? 'good' : 'warning',
-      speed: stream.status === 'live' ? '1.00x' : '0.00x',
+      dropped_frames: stream.dropped_frames ?? null,
+      cpu_usage_pct: stream.cpu_usage_pct ?? null,
+      mem_usage_mb: stream.mem_usage_mb ?? null,
+      health_status: stream.health_status || 'unknown',
+      speed: stream.speed ?? null,
+      output_time_seconds: stream.output_time_seconds ?? null,
+      playback_delay_seconds: stream.playback_delay_seconds ?? null,
+      video_mode: stream.video_mode ?? null,
+      transcode_reason: stream.transcode_reason ?? null,
+      cache_status: stream.cache_status ?? null,
+      cache_fallback_reason: stream.cache_fallback_reason ?? null,
+      cache_progress_pct: stream.cache_progress_pct ?? null,
+      cache_bytes_downloaded: stream.cache_bytes_downloaded ?? null,
+      cache_total_bytes: stream.cache_total_bytes ?? null,
+      input_download_mbps: stream.input_download_mbps ?? null,
+      cache_disk_total_bytes: stream.cache_disk_total_bytes ?? null,
+      cache_disk_available_bytes: stream.cache_disk_available_bytes ?? null,
+      cache_disk_used_bytes: stream.cache_disk_used_bytes ?? null,
+      cache_used_bytes: stream.cache_used_bytes ?? null,
+      cache_video_count: stream.cache_video_count ?? null,
+      cached_video_width: stream.cached_video_width ?? null,
+      cached_video_height: stream.cached_video_height ?? null,
+      cached_video_codec: stream.cached_video_codec ?? null,
+      reconnect_attempts: stream.reconnect_attempts ?? null,
       uptime_seconds: stream.uptime_seconds || 0,
       destinations_count: (stream.destinations?.length || 0) + 1,
-      timestamp: new Date().toISOString(),
+      timestamp: stream.telemetry_timestamp || new Date().toISOString(),
     },
+  });
+});
+
+app.get('/api/streams/:id/telemetry/stream', (req, res) => {
+  const stream = getAuthorizedStream(req.streamUser, readStreams(), req.params.id);
+  if (!stream) return res.status(404).end();
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  const send = (payload) => res.write(`data: ${JSON.stringify(payload)}\\n\\n`);
+  send({
+    streamId: stream.id,
+    status: stream.status,
+    bitrate_kbps: stream.current_bitrate_kbps || 0,
+    fps: stream.fps || 0,
+    dropped_frames: stream.dropped_frames ?? null,
+    cpu_usage_pct: stream.cpu_usage_pct ?? null,
+    mem_usage_mb: stream.mem_usage_mb ?? null,
+    health_status: stream.health_status || 'unknown',
+    speed: stream.speed ?? null,
+    output_time_seconds: stream.output_time_seconds ?? null,
+    playback_delay_seconds: stream.playback_delay_seconds ?? null,
+    video_mode: stream.video_mode ?? null,
+    transcode_reason: stream.transcode_reason ?? null,
+    cache_status: stream.cache_status ?? null,
+    cache_fallback_reason: stream.cache_fallback_reason ?? null,
+    cache_progress_pct: stream.cache_progress_pct ?? null,
+    cache_bytes_downloaded: stream.cache_bytes_downloaded ?? null,
+    cache_total_bytes: stream.cache_total_bytes ?? null,
+    input_download_mbps: stream.input_download_mbps ?? null,
+    cache_disk_total_bytes: stream.cache_disk_total_bytes ?? null,
+    cache_disk_available_bytes: stream.cache_disk_available_bytes ?? null,
+    cache_disk_used_bytes: stream.cache_disk_used_bytes ?? null,
+    cache_used_bytes: stream.cache_used_bytes ?? null,
+    cache_video_count: stream.cache_video_count ?? null,
+    cached_video_width: stream.cached_video_width ?? null,
+    cached_video_height: stream.cached_video_height ?? null,
+    cached_video_codec: stream.cached_video_codec ?? null,
+    reconnect_attempts: stream.reconnect_attempts ?? null,
+    uptime_seconds: stream.uptime_seconds || 0,
+    destinations_count: (stream.destinations?.length || 0) + 1,
+    timestamp: stream.telemetry_timestamp || new Date().toISOString(),
+  });
+  const unsubscribe = subscribeToStreamTelemetry(stream.id, send);
+  const keepAlive = setInterval(() => res.write(': keep-alive\\n\\n'), 15_000);
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    unsubscribe();
   });
 });
 
@@ -1183,7 +1270,9 @@ async function attachStreamStatusBridge() {
     await sub.subscribe('stream-telemetry-events');
     // Track latest event time per stream to reject stale/out-of-order messages.
     const latestEventTime = new Map();
-    const MIN_STALE_AGE_MS = 5000; // Ignore events older than 5 seconds
+    const latestTelemetryWriteTime = new Map();
+    const MAX_EVENT_AGE_MS = 30_000;
+    const TELEMETRY_WRITE_INTERVAL_MS = 1000;
 
     sub.on('message', (_channel, message) => {
       try {
@@ -1198,22 +1287,19 @@ async function attachStreamStatusBridge() {
         // This ensures the dashboard never stays stale after a Redis outage.
         const latestEventTs = latestEventTime.get(payload.streamId) || new Date(0).getTime();
         const eventTs = typeof payload.timestamp === 'string' ? new Date(payload.timestamp).getTime() : 0;
-        if (eventTs > 0 && latestEventTs >= eventTs && eventTs + MIN_STALE_AGE_MS > Date.now()) {
-          // Stale or duplicate message (older timestamp or very recent older-than-max).
-          if (payload.status === 'live' && (current.status === 'idle' || current.status === 'stopping')) {
-            // Explicitly block revival of stopped streams by stale live messages.
-            return;
-          }
+        if (eventTs > 0 && (eventTs <= latestEventTs || eventTs + MAX_EVENT_AGE_MS < Date.now())) {
           return;
         }
-        latestEventTime.set(payload.streamId, eventTs);
 
-        // Never revive a stream that is already stopped/stopped gracefully with a stale 'live' message.
+        // Never revive a stream that was explicitly stopped by a late worker event.
         if ((current.status === 'idle' || current.status === 'stopping') && payload.status === 'live') return;
 
+        if (eventTs > 0) latestEventTime.set(payload.streamId, eventTs);
         const nextStatus = payload.status || current.status;
-        // Only write when the status actually changes (dedup against duplicate Redis messages).
-        if (nextStatus === current.status && eventTs === latestEventTime.get(payload.streamId)) return;
+        broadcastStreamTelemetry(payload.streamId, payload);
+        const statusChanged = nextStatus !== current.status;
+        const lastWriteAt = latestTelemetryWriteTime.get(payload.streamId) || 0;
+        if (!statusChanged && Date.now() - lastWriteAt < TELEMETRY_WRITE_INTERVAL_MS) return;
 
         const next = {
           ...current,
@@ -1224,9 +1310,23 @@ async function attachStreamStatusBridge() {
           dropped_frames: Number.isInteger(payload.dropped_frames) ? payload.dropped_frames : (current.dropped_frames || 0),
           cpu_usage_pct: Number.isFinite(payload.cpu_usage_pct) ? payload.cpu_usage_pct : current.cpu_usage_pct,
           mem_usage_mb: Number.isFinite(payload.mem_usage_mb) ? payload.mem_usage_mb : current.mem_usage_mb,
-          // Derive health status from actual metrics
-          health_status: payload.dropped_frames > 5 ? 'warning' : current.health_status !== undefined && current.health_status !== '' ? current.health_status : 'excellent',
+          health_status: typeof payload.health_status === 'string'
+            ? payload.health_status
+            : Number.isFinite(payload.dropped_frames) && payload.dropped_frames > 0
+              ? 'warning'
+              : current.health_status || 'unknown',
         };
+        for (const field of [
+          'speed', 'output_time_seconds', 'playback_delay_seconds', 'video_mode', 'transcode_reason',
+          'cache_status', 'cache_fallback_reason', 'cache_progress_pct', 'cache_bytes_downloaded', 'cache_total_bytes',
+          'input_download_mbps', 'cache_disk_total_bytes', 'cache_disk_available_bytes',
+          'cache_disk_used_bytes', 'cache_used_bytes', 'cache_video_count', 'cached_video_width',
+          'cached_video_height', 'cached_video_codec', 'reconnect_attempts', 'uptime_seconds',
+          'destinations_count',
+        ]) {
+          if (Object.hasOwn(payload, field)) next[field] = payload[field];
+        }
+        if (typeof payload.timestamp === 'string') next.telemetry_timestamp = payload.timestamp;
 
         if (nextStatus === 'live') {
           next.ffmpeg_pid = current.ffmpeg_pid || null;
@@ -1249,6 +1349,7 @@ async function attachStreamStatusBridge() {
 
         streams[idx] = next;
         writeStreams(streams);
+        latestTelemetryWriteTime.set(payload.streamId, Date.now());
       } catch { /* ignore malformed telemetry messages */ }
     });
     sub.on('error', () => {});

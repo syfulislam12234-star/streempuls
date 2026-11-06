@@ -22,13 +22,13 @@ interface StreamTelemetryModalProps {
 
 export const StreamTelemetryModal: React.FC<StreamTelemetryModalProps> = ({ stream, onClose }) => {
   const [telemetry, setTelemetry] = useState<StreamTelemetryData>({
-    bitrate_kbps: stream.status === 'live' ? 6000 : 0,
-    fps: stream.status === 'live' ? 60.0 : 0,
-    dropped_frames: 0,
-    cpu_usage_pct: stream.status === 'live' ? 0.38 : 0,
-    mem_usage_mb: stream.status === 'live' ? 46.5 : 0,
-    health_status: stream.status === 'live' ? 'excellent' : 'warning',
-    speed: stream.status === 'live' ? '1.00x' : '0.00x',
+    bitrate_kbps: 0,
+    fps: 0,
+    dropped_frames: null,
+    cpu_usage_pct: null,
+    mem_usage_mb: null,
+    health_status: 'unknown',
+    speed: null,
     uptime_seconds: stream.uptime_seconds || 0,
     destinations_count: (stream.destinations?.length || 0) + 1,
     timestamp: new Date().toISOString(),
@@ -120,7 +120,7 @@ export const StreamTelemetryModal: React.FC<StreamTelemetryModalProps> = ({ stre
             <div className="text-xl font-extrabold text-white">
               {telemetry.bitrate_kbps > 0 ? `${telemetry.bitrate_kbps.toLocaleString()} kbps` : 'Standby'}
             </div>
-            <div className="text-[10px] text-emerald-400 font-medium">Optimal 1080p60</div>
+            <div className="text-[10px] text-slate-400 font-medium">Measured FFmpeg output</div>
           </div>
 
           {/* FPS */}
@@ -130,22 +130,22 @@ export const StreamTelemetryModal: React.FC<StreamTelemetryModalProps> = ({ stre
               <Activity className="w-3.5 h-3.5 text-emerald-400" />
             </div>
             <div className="text-xl font-extrabold text-white">
-              {telemetry.fps > 0 ? `${telemetry.fps.toFixed(1)} fps` : '60.0 fps'}
+              {telemetry.fps > 0 ? `${telemetry.fps.toFixed(1)} fps` : 'Measuring…'}
             </div>
-            <div className="text-[10px] text-slate-400">Zero jitter</div>
+            <div className="text-[10px] text-slate-400">Measured progress output</div>
           </div>
 
           {/* Dropped Frames */}
           <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-1">
             <div className="flex items-center justify-between text-slate-400 text-xs">
               <span>Dropped Frames</span>
-              <AlertTriangle className={`w-3.5 h-3.5 ${telemetry.dropped_frames > 0 ? 'text-amber-400' : 'text-slate-500'}`} />
+              <AlertTriangle className={`w-3.5 h-3.5 ${(telemetry.dropped_frames || 0) > 0 ? 'text-amber-400' : 'text-slate-500'}`} />
             </div>
-            <div className={`text-xl font-extrabold ${telemetry.dropped_frames > 0 ? 'text-amber-400' : 'text-white'}`}>
-              {telemetry.dropped_frames}
+            <div className={`text-xl font-extrabold ${(telemetry.dropped_frames || 0) > 0 ? 'text-amber-400' : 'text-white'}`}>
+              {telemetry.dropped_frames ?? '—'}
             </div>
-            <div className="text-[10px] text-emerald-400 font-medium">
-              {telemetry.dropped_frames === 0 ? '100% Stable' : 'Auto-recovering'}
+            <div className="text-[10px] text-slate-400 font-medium">
+              {telemetry.dropped_frames === null ? 'Waiting for FFmpeg' : telemetry.dropped_frames === 0 ? 'None reported' : 'Frames dropped'}
             </div>
           </div>
 
@@ -153,9 +153,9 @@ export const StreamTelemetryModal: React.FC<StreamTelemetryModalProps> = ({ stre
           <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-1">
             <div className="flex items-center justify-between text-slate-400 text-xs">
               <span>Health Status</span>
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+              <CheckCircle2 className={`w-3.5 h-3.5 ${telemetry.health_status === 'good' || telemetry.health_status === 'excellent' ? 'text-emerald-400' : 'text-amber-400'}`} />
             </div>
-            <div className="text-lg font-extrabold text-emerald-400 capitalize">
+            <div className={`text-lg font-extrabold capitalize ${telemetry.health_status === 'good' || telemetry.health_status === 'excellent' ? 'text-emerald-400' : 'text-amber-400'}`}>
               {telemetry.health_status}
             </div>
             <div className="text-[10px] text-slate-400">Uptime: {formatUptime(telemetry.uptime_seconds)}</div>
@@ -168,20 +168,20 @@ export const StreamTelemetryModal: React.FC<StreamTelemetryModalProps> = ({ stre
             <div className="flex items-center justify-between text-xs font-semibold text-slate-300">
               <span className="flex items-center space-x-1.5">
                 <Cpu className="w-4 h-4 text-purple-400" />
-                <span>CPU Load (Direct Copy Mode)</span>
+                <span>FFmpeg Process CPU</span>
               </span>
               <span className="text-purple-400 font-mono font-bold">
-                {telemetry.cpu_usage_pct.toFixed(2)}%
+                {telemetry.cpu_usage_pct === null ? 'N/A' : `${telemetry.cpu_usage_pct.toFixed(2)}%`}
               </span>
             </div>
             <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
               <div
                 className="bg-purple-500 h-full rounded-full transition-all duration-500"
-                style={{ width: `${Math.min(100, telemetry.cpu_usage_pct * 15)}%` }}
+                style={{ width: `${Math.min(100, (telemetry.cpu_usage_pct || 0) * 15)}%` }}
               />
             </div>
             <p className="text-[11px] text-slate-400">
-              FFmpeg direct copy consumes near-zero CPU by bypassing video re-encoding.
+              Mode: {telemetry.video_mode || 'not reported'}{telemetry.transcode_reason ? ` (${telemetry.transcode_reason})` : ''}. CPU is sampled from the FFmpeg process when available.
             </p>
           </div>
 
@@ -189,21 +189,59 @@ export const StreamTelemetryModal: React.FC<StreamTelemetryModalProps> = ({ stre
             <div className="flex items-center justify-between text-xs font-semibold text-slate-300">
               <span className="flex items-center space-x-1.5">
                 <HardDrive className="w-4 h-4 text-cyan-400" />
-                <span>Worker Process RAM</span>
+                <span>FFmpeg Process RAM</span>
               </span>
               <span className="text-cyan-400 font-mono font-bold">
-                {telemetry.mem_usage_mb.toFixed(1)} MB
+                {telemetry.mem_usage_mb === null ? 'N/A' : `${telemetry.mem_usage_mb.toFixed(1)} MB`}
               </span>
             </div>
             <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
               <div
                 className="bg-cyan-500 h-full rounded-full transition-all duration-500"
-                style={{ width: `${Math.min(100, (telemetry.mem_usage_mb / 500) * 100)}%` }}
+                style={{ width: `${Math.min(100, ((telemetry.mem_usage_mb || 0) / 500) * 100)}%` }}
               />
             </div>
             <p className="text-[11px] text-slate-400">
               Bounded isolated process footprint inside Docker worker container.
             </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+          <div className="rounded-xl bg-slate-950/60 border border-slate-800 p-3">
+            <span className="block text-slate-400">FFmpeg speed</span>
+            <span className="font-mono font-bold text-white">{telemetry.speed || 'Waiting for progress'}</span>
+          </div>
+          <div className="rounded-xl bg-slate-950/60 border border-slate-800 p-3">
+            <span className="block text-slate-400">Output delay vs wall clock</span>
+            <span className="font-mono font-bold text-white">
+              {telemetry.playback_delay_seconds == null ? 'N/A' : `${telemetry.playback_delay_seconds.toFixed(2)} s`}
+            </span>
+          </div>
+          <div className="rounded-xl bg-slate-950/60 border border-slate-800 p-3">
+            <span className="block text-slate-400">Local video cache</span>
+            <span className="font-mono font-bold text-white capitalize">
+              {telemetry.cache_status || 'not applicable'}
+              {telemetry.cache_status === 'downloading' && telemetry.cache_progress_pct != null
+                ? ` · ${telemetry.cache_progress_pct.toFixed(0)}%`
+                : ''}
+            </span>
+            {telemetry.cache_fallback_reason ? (
+              <span className="block text-slate-400">Fallback: {telemetry.cache_fallback_reason}</span>
+            ) : null}
+            {telemetry.input_download_mbps != null && telemetry.cache_status === 'downloading' ? (
+              <span className="block text-slate-400">{telemetry.input_download_mbps.toFixed(2)} Mbps</span>
+            ) : null}
+            {telemetry.cached_video_codec ? (
+              <span className="block text-slate-400">
+                {telemetry.cached_video_codec} · {telemetry.cached_video_width}×{telemetry.cached_video_height}
+              </span>
+            ) : null}
+            {telemetry.cache_disk_available_bytes != null ? (
+              <span className="block text-slate-400">
+                Disk free: {(telemetry.cache_disk_available_bytes / (1024 ** 3)).toFixed(1)} GiB
+              </span>
+            ) : null}
           </div>
         </div>
 

@@ -449,7 +449,7 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
           audience,
           visibility,
           scheduledFor: visibility === 'scheduled' ? scheduledIso : undefined,
-          directCopyMode: orientation === 'horizontal',
+          directCopyMode: true,
           destinations: validDestinations,
         });
       }

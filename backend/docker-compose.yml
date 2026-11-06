@@ -111,6 +111,7 @@ services:
       context: .
       dockerfile: Dockerfile.worker
     restart: on-failure
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "node", "healthcheck-worker.js"]
       interval: 15s
@@ -138,6 +139,9 @@ services:
       - WORKER_CONCURRENCY=10
       - MEMORY_CEILING_MB=1850
       - UPLOADS_DIR=/app/uploads
+      - VIDEO_CACHE_DIR=/app/video-cache
+      - VIDEO_CACHE_MIN_FREE_BYTES=1073741824
+      - VIDEO_CACHE_DOWNLOAD_CONCURRENCY=2
       # Modular Storage Provider: Supabase active by default, switchable to R2
       - STORAGE_PROVIDER=${STORAGE_PROVIDER:-supabase}
       - SUPABASE_URL=${SUPABASE_URL}
@@ -159,6 +163,7 @@ services:
         condition: service_started
     volumes:
       - ../uploads/sample_lofi_broadcast_1080p60.mp4:/app/uploads/sample_lofi_broadcast_1080p60.mp4:ro
+      - video-cache:/app/video-cache
     networks:
       - streampulse-net
     logging:
@@ -171,6 +176,8 @@ volumes:
   redis-data:
     driver: local
   app-data:
+    driver: local
+  video-cache:
     driver: local
 
 networks:

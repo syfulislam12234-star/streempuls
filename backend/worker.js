@@ -22,6 +22,7 @@ import { Worker } from 'bullmq';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { redisConfig, redisClient, QUEUE_NAME } from './queue.js';
@@ -32,9 +33,15 @@ import { buildStreamDestinations } from './streamDestinations.js';
 import { runWithStreamLease } from './streamLeaseRunner.js';
 import { extractFfmpegErrorLines, sanitizeChildProcessError, sanitizeFfmpegDiagnostic } from './streamDiagnostics.js';
 import { claimStreamOwnership, updateStreamWhenOwned } from './streamOwnership.js';
-import { resolveLocalUpload } from './localVideoSource.js';
+import { cleanupOrphanedVideoCacheFiles, acquireVideoCache, getVideoCacheStats } from './videoCache.js';
+import { stopStreamsThenClose } from './workerShutdown.js';
+import { terminateChildAndWait, terminateChildAndReleaseCache, scheduleRestartAfterExit } from './ffmpegLifecycle.js';
+import { getCacheFallbackReason, retryCachePreparation } from './cacheFallback.js';
+import { downloadVideoToLocalFile, resolveLocalUpload } from './localVideoSource.js';
+import { directCopyIneligibility, parseFfmpegProgressRecord, probeFfmpegVideoMetadata, readProcessMemoryMb, sampleProcessCpuPercent } from './ffmpegProgress.js';
 
 dotenv.config();
+const DIRECT_COPY_ENABLED = process.env.DIRECT_COPY_ENABLED !== 'false';
 
 // ----------------------------------------------------------------------------
 // Worker Node Identity & Capacity Configuration
@@ -73,39 +80,25 @@ const SIGNED_SOURCE_REFRESH_SKEW_MS = 5 * 60 * 1000;
 const MAX_FFMPEG_DIAGNOSTICS = 12;
 
 function terminateFfmpegChild(child, gracePeriodMs = 5000) {
-  if (!child || child.exitCode != null || child.signalCode != null) return Promise.resolve();
-
-  return new Promise((resolve) => {
-    let settled = false;
-    let forceKillTimer;
-    let finalTimer;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(forceKillTimer);
-      clearTimeout(finalTimer);
-      child.removeListener?.('exit', finish);
-      resolve();
-    };
-
-    child.once?.('exit', finish);
-    forceKillTimer = setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch { finish(); return; }
-      finalTimer = setTimeout(finish, 1000);
-    }, gracePeriodMs);
-    forceKillTimer.unref?.();
-
-    try { child.kill('SIGTERM'); } catch { finish(); }
-  });
+  return terminateChildAndWait(child, { gracePeriodMs });
 }
 
 function redactUrlQuery(value) {
   try {
-    const url = new URL(value);
-    return url.search ? url.origin + url.pathname + '?[REDACTED]' : value;
+    new URL(value);
+    return '[REMOTE VIDEO SOURCE REDACTED]';
   } catch {
     return value;
   }
+}
+
+function probeDirectCopyEligibility(source) {
+  return probeFfmpegVideoMetadata(source)
+    .then((metadata) => {
+      const reason = directCopyIneligibility(metadata);
+      return { eligible: !reason, reason, metadata };
+    })
+    .catch((error) => ({ eligible: false, reason: error?.message?.includes('timed out') ? 'ffprobe-timeout' : 'ffprobe-error', metadata: null }));
 }
 
 /**
@@ -196,6 +189,11 @@ async function launchFfmpegStream(job, lease, abortSignal) {
   let signedUrlGeneratedAt = null;
   let signedUrlTtlMs = null;
   let refreshSignedInputSource = null;
+  let r2SourceToCache = null;
+  let r2CachedMetadata = null;
+  let r2CacheAttempted = false;
+  let cachedR2SourceLease = null;
+  const streamStartController = new AbortController();
   const sensitiveValues = [streamKey, ...(Array.isArray(destinations) ? destinations.map((destination) => destination?.streamKey) : [])];
   if (videoUrl && !videoUrl.startsWith('http://') && !videoUrl.startsWith('https://')) {
     // Resolve API-facing /uploads URLs against this worker's configured local
@@ -207,27 +205,37 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       ) || videoUrl;
     } else {
       const r2Provider = STORAGE_PROVIDER === 'r2' ? getStorageProvider('r2') : null;
-    const cleanPath = r2Provider
-      ? normalizeR2ObjectKey(videoUrl, r2Provider.bucket)
-      : videoUrl.replace(/^(stream-assets|live-stream-assets)\//, '').replace(/^\/+/, '');
-    if (r2Provider) await r2Provider.headObject(cleanPath);
-    let signedUrl = null;
-    try {
-      signedUrl = r2Provider
-        ? await r2Provider.getSignedUrl(cleanPath, SIGNED_SOURCE_URL_TTL_MS / 1000)
-        : await getSignedStorageUrl(cleanPath);
-    } catch (signErr) {
-      console.warn('[FFmpeg Engine] Storage URL signing failed for stream ' + streamId + ': ' + signErr.message);
-    }
-    inputSource = signedUrl || getPublicStorageUrl(cleanPath);
-    if (signedUrl) {
-      const provider = r2Provider || getStorageProvider(STORAGE_PROVIDER);
-      refreshSignedInputSource = () => provider.getSignedUrl(cleanPath, SIGNED_SOURCE_URL_TTL_MS / 1000);
-      signedUrlGeneratedAt = Date.now();
-      signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
-    }
+      const cleanPath = r2Provider
+        ? normalizeR2ObjectKey(videoUrl, r2Provider.bucket)
+        : videoUrl.replace(/^(stream-assets|live-stream-assets)\//, '').replace(/^\/+/, '');
+      if (r2Provider) {
+        const metadata = await r2Provider.headObject(cleanPath);
+        r2SourceToCache = {
+          provider: r2Provider,
+          objectKey: cleanPath,
+          expectedBytes: Number(metadata.ContentLength),
+          etag: metadata.ETag || null,
+          lastModified: metadata.LastModified instanceof Date ? metadata.LastModified.toISOString() : null,
+        };
+        inputSource = '[R2 source will be cached locally]';
+      } else {
+        let signedUrl = null;
+        try {
+          signedUrl = await getSignedStorageUrl(cleanPath);
+        } catch {
+          console.warn('[FFmpeg Engine] Storage URL signing failed for stream ' + streamId);
+        }
+        inputSource = signedUrl || getPublicStorageUrl(cleanPath);
+        if (signedUrl) {
+          const provider = getStorageProvider(STORAGE_PROVIDER);
+          refreshSignedInputSource = () => provider.getSignedUrl(cleanPath, SIGNED_SOURCE_URL_TTL_MS / 1000);
+          signedUrlGeneratedAt = Date.now();
+          signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
+        }
+      }
     }
   } else if (typeof videoUrl === 'string' && /^https?:\/\//i.test(videoUrl)) {
+    let identifiedR2Source = false;
     try {
       const parsedUrl = new URL(videoUrl);
       const r2Provider = getStorageProvider('r2');
@@ -236,6 +244,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         endpoint: r2Provider.endpoint,
         publicDomain: r2Provider.publicDomain,
       });
+      identifiedR2Source = Boolean(r2Object);
       const pathname = decodeURIComponent(parsedUrl.pathname.replace(/^\/+/, ''));
       const supabaseStorageMatch = pathname.match(/^storage\/v1\/object\/(?:public|sign|authenticated)\/[^/]+\/(.+)$/);
       const isSupabaseStorageUrl = parsedUrl.hostname.includes('supabase.co') && Boolean(supabaseStorageMatch);
@@ -243,17 +252,31 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         const isR2Url = Boolean(r2Object);
         const objectKey = isR2Url ? r2Object.key : supabaseStorageMatch[1];
         const provider = isR2Url ? r2Provider : getStorageProvider('supabase');
-        if (isR2Url) await provider.headObject(objectKey);
-        const signedUrl = await provider.getSignedUrl(objectKey, SIGNED_SOURCE_URL_TTL_MS / 1000);
-        if (signedUrl && signedUrl !== videoUrl) {
-          inputSource = signedUrl;
-          refreshSignedInputSource = () => provider.getSignedUrl(objectKey, SIGNED_SOURCE_URL_TTL_MS / 1000);
-          signedUrlGeneratedAt = Date.now();
-          signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
+        if (isR2Url) {
+          const metadata = await provider.headObject(objectKey);
+          r2SourceToCache = {
+            provider,
+            objectKey,
+            expectedBytes: Number(metadata.ContentLength),
+            etag: metadata.ETag || null,
+            lastModified: metadata.LastModified instanceof Date ? metadata.LastModified.toISOString() : null,
+          };
+          inputSource = '[R2 source will be cached locally]';
+        } else {
+          const signedUrl = await provider.getSignedUrl(objectKey, SIGNED_SOURCE_URL_TTL_MS / 1000);
+          if (signedUrl && signedUrl !== videoUrl) {
+            inputSource = signedUrl;
+            refreshSignedInputSource = () => provider.getSignedUrl(objectKey, SIGNED_SOURCE_URL_TTL_MS / 1000);
+            signedUrlGeneratedAt = Date.now();
+            signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
+          }
         }
       }
-    } catch (signErr) {
-      console.warn("[FFmpeg Engine] Storage URL signing failed for stream " + streamId + ": " + signErr.message);
+    } catch {
+      if (identifiedR2Source) {
+        throw new Error('R2 video could not be prepared for local worker storage.');
+      }
+      console.warn('[FFmpeg Engine] Remote video source could not be resolved for stream ' + streamId);
     }
   }
 
@@ -286,12 +309,34 @@ async function launchFfmpegStream(job, lease, abortSignal) {
     let ffmpegStartSequence = 0;
     let telemetryUpdateCount = 0;
     let telemetrySequence = 0;
+    let copyFallbackAttempted = false;
+    let forceTranscode = false;
     const isVertical = orientation === 'vertical';
     const recentFfmpegDiagnostics = [];
     let leaseLostError = null;
     let leaseLossHandled = false;
     let heartbeatTimer = null;
-    const handleAbort = () => { void streamController.stop('Start cancelled before broadcast'); };
+    let progressWatchdogTimer = null;
+    let cacheTelemetry = { cache_status: r2SourceToCache ? 'pending' : 'local-or-remote' };
+    const releaseCachedR2Source = async () => {
+      const cacheLease = cachedR2SourceLease;
+      cachedR2SourceLease = null;
+      if (cacheLease) await cacheLease.release().catch(() => {});
+    };
+    const terminateAndReleaseCachedSource = async (child) => {
+      return terminateChildAndReleaseCache(child, releaseCachedR2Source);
+    };
+    const publishTelemetry = async (payload) => {
+      try {
+        const message = JSON.stringify(payload);
+        await redisClient.publish(`stream:telemetry:${streamId}`, message);
+        await redisClient.publish('stream-telemetry-events', message);
+      } catch {}
+    };
+    const handleAbort = () => {
+      streamStartController.abort();
+      void streamController.stop('Start cancelled before broadcast');
+    };
     const updateOwnedStream = (updates, release = false) => updateStreamWhenOwned(supabase, {
       streamId,
       token: ownershipToken,
@@ -315,13 +360,19 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       stop: async (reason = 'User requested stop') => {
         isTerminated = true;
         streamController.isIntentionalStop = true;
-        if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+        streamStartController.abort();
         if (reconnectTimeout) {
           clearTimeout(reconnectTimeout);
           reconnectTimeout = null;
         }
 
-        await terminateFfmpegChild(currentChild);
+        const childStopped = await terminateAndReleaseCachedSource(currentChild);
+        if (!childStopped) {
+          console.error('[Process Tracker] Could not confirm FFmpeg exit for stream ' + streamId + '; retaining ownership until the child exits.');
+          return false;
+        }
+        if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+        if (progressWatchdogTimer) { clearInterval(progressWatchdogTimer); progressWatchdogTimer = null; }
         activeStreams.delete(streamId);
 
         const released = await updateOwnedStream({
@@ -349,10 +400,45 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       leaseLossHandled = true;
       leaseLostError = error || new Error('Distributed stream lock was lost.');
       isTerminated = true;
+      streamStartController.abort();
       if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
       streamController.isIntentionalStop = true;
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
-      await terminateFfmpegChild(currentChild);
+      const childStopped = await terminateAndReleaseCachedSource(currentChild);
+      if (!childStopped && currentChild) {
+        const child = currentChild;
+        let finalized = false;
+        const retainClaimHeartbeat = setInterval(() => {
+          if (child.exitCode != null || child.signalCode != null) return;
+          const now = new Date().toISOString();
+          void updateOwnedStream({ last_heartbeat: now, updated_at: now }).catch(() => {});
+        }, 5000);
+        retainClaimHeartbeat.unref?.();
+        const finalizeAfterChildExit = async () => {
+          if (finalized) return;
+          finalized = true;
+          clearInterval(retainClaimHeartbeat);
+          if (progressWatchdogTimer) { clearInterval(progressWatchdogTimer); progressWatchdogTimer = null; }
+          activeStreams.delete(streamId);
+          abortSignal?.removeEventListener('abort', handleAbort);
+          try {
+            await updateOwnedStream({
+              status: 'ERROR',
+              ffmpeg_pid: null,
+              last_error: 'Distributed stream lock was lost; FFmpeg was stopped to avoid split ownership.',
+              updated_at: new Date().toISOString(),
+            }, true);
+          } catch {}
+          await releaseCachedR2Source();
+          reject(new Error('Distributed stream lock was lost; FFmpeg was stopped to avoid split ownership.'));
+        };
+        child.once('exit', () => { void finalizeAfterChildExit(); });
+        child.once('close', () => { void finalizeAfterChildExit(); });
+        if (child.exitCode != null || child.signalCode != null) void finalizeAfterChildExit();
+        console.error('[Process Tracker] Distributed lease was lost, but FFmpeg exit is unconfirmed; retaining the database claim until the child exits.');
+        return;
+      }
+      if (progressWatchdogTimer) { clearInterval(progressWatchdogTimer); progressWatchdogTimer = null; }
       activeStreams.delete(streamId);
       const safeError = 'Distributed stream lock was lost; FFmpeg was stopped to avoid split ownership.';
       try {
@@ -388,6 +474,132 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         return;
       }
 
+      if (r2SourceToCache && !cachedR2SourceLease && !r2CacheAttempted) {
+        r2CacheAttempted = true;
+        const cacheDir = process.env.VIDEO_CACHE_DIR || path.join(os.tmpdir(), 'streempulse-video-cache');
+        const expectedBytes = r2SourceToCache.expectedBytes;
+        const maxFileBytes = Number(process.env.VIDEO_CACHE_MAX_FILE_BYTES) || 5_000_000_000;
+        const minFreeBytes = Number(process.env.VIDEO_CACHE_MIN_FREE_BYTES) || 1024 * 1024 * 1024;
+        try { await cleanupOrphanedVideoCacheFiles(cacheDir, { redis: redisClient }); } catch {}
+
+        const sourceVersionKnown = Boolean(r2SourceToCache.etag || r2SourceToCache.lastModified);
+        const cachePreparation = await retryCachePreparation({
+          attempts: sourceVersionKnown ? 2 : 0,
+          shouldAbort: () => streamStartController.signal.aborted || Boolean(lease?.lost),
+          prepare: async () => {
+            const signedUrl = await r2SourceToCache.provider.getSignedUrl(
+              r2SourceToCache.objectKey,
+              SIGNED_SOURCE_URL_TTL_MS / 1000,
+            );
+            if (!signedUrl) throw new Error('Storage URL unavailable.');
+            let lastProgressAt = 0;
+            let lastProgressBytes = 0;
+            let lastProgressTime = Date.now();
+            return acquireVideoCache({
+              redis: redisClient,
+              cacheDir,
+              identity: {
+                provider: 'r2',
+                bucket: r2SourceToCache.provider.bucket,
+                objectKey: r2SourceToCache.objectKey,
+                etag: r2SourceToCache.etag,
+                lastModified: r2SourceToCache.lastModified,
+                expectedBytes,
+              },
+              expectedBytes,
+              maxFileBytes,
+              minFreeBytes,
+              signal: streamStartController.signal,
+              verify: probeFfmpegVideoMetadata,
+              onProgress: (receivedBytes, totalBytes) => {
+                const now = Date.now();
+                if (now - lastProgressAt < 1000) return;
+                const elapsedSeconds = Math.max((now - lastProgressTime) / 1000, 0.001);
+                const downloadMbps = ((receivedBytes - lastProgressBytes) * 8) / elapsedSeconds / 1_000_000;
+                lastProgressAt = now;
+                lastProgressBytes = receivedBytes;
+                lastProgressTime = now;
+                cacheTelemetry = {
+                  cache_status: 'downloading',
+                  cache_bytes_downloaded: receivedBytes,
+                  cache_total_bytes: totalBytes || expectedBytes,
+                  cache_progress_pct: totalBytes || expectedBytes
+                    ? Math.min(100, (receivedBytes / (totalBytes || expectedBytes)) * 100)
+                    : null,
+                  input_download_mbps: +downloadMbps.toFixed(2),
+                };
+                void publishTelemetry({ streamId, ...cacheTelemetry, timestamp: new Date().toISOString() });
+              },
+              download: (destinationPath, { signal, onProgress }) => downloadVideoToLocalFile(
+                signedUrl,
+                destinationPath,
+                { expectedBytes, maxBytes: maxFileBytes, signal, onProgress },
+              ),
+            });
+          },
+        });
+        const cachedVideo = cachePreparation.value;
+        if (cachePreparation.cancelled) {
+          await cachedVideo?.release();
+          return;
+        }
+
+        if (cachedVideo) {
+          cachedR2SourceLease = cachedVideo;
+          r2CachedMetadata = cachedVideo.mediaMetadata;
+          inputSource = cachedVideo.path;
+          const cacheStats = await getVideoCacheStats(cacheDir).catch(() => ({}));
+          cacheTelemetry = {
+            cache_status: cachedVideo.cacheHit ? 'hit' : 'ready',
+            cache_progress_pct: 100,
+            cache_bytes_downloaded: cachedVideo.sizeBytes,
+            cache_total_bytes: cachedVideo.sizeBytes,
+            input_download_mbps: cachedVideo.cacheHit ? 0 : cacheTelemetry.input_download_mbps,
+            cache_disk_total_bytes: cacheStats.diskTotalBytes ?? null,
+            cache_disk_available_bytes: cacheStats.diskAvailableBytes ?? null,
+            cache_disk_used_bytes: cacheStats.diskTotalBytes != null && cacheStats.diskAvailableBytes != null
+              ? cacheStats.diskTotalBytes - cacheStats.diskAvailableBytes
+              : null,
+            cache_used_bytes: cacheStats.cachedVideoBytes ?? null,
+            cache_video_count: cacheStats.cachedVideoCount ?? null,
+            cached_video_width: cachedVideo.mediaMetadata?.width ?? null,
+            cached_video_height: cachedVideo.mediaMetadata?.height ?? null,
+            cached_video_codec: cachedVideo.mediaMetadata?.codecName ?? null,
+          };
+          console.log('[Video Cache] ' + (cachedVideo.cacheHit ? 'hit' : 'created') + ' for stream ' + streamId);
+        } else {
+          try {
+            const fallbackUrl = await r2SourceToCache.provider.getSignedUrl(
+              r2SourceToCache.objectKey,
+              SIGNED_SOURCE_URL_TTL_MS / 1000,
+            );
+            if (!fallbackUrl) throw new Error('Storage URL unavailable.');
+            inputSource = fallbackUrl;
+            refreshSignedInputSource = () => r2SourceToCache.provider.getSignedUrl(
+              r2SourceToCache.objectKey,
+              SIGNED_SOURCE_URL_TTL_MS / 1000,
+            );
+            signedUrlGeneratedAt = Date.now();
+            signedUrlTtlMs = SIGNED_SOURCE_URL_TTL_MS;
+            cacheTelemetry = {
+              cache_status: 'direct-r2-fallback',
+              cache_progress_pct: null,
+              cache_fallback_reason: getCacheFallbackReason(sourceVersionKnown),
+            };
+            console.warn('[Video Cache] Local cache unavailable; using direct R2 input for stream ' + streamId);
+          } catch {
+            await handleProcessCrash(new Error('The video is unavailable in local storage and could not be opened from R2.'), null, null);
+            return;
+          }
+        }
+        void publishTelemetry({ streamId, ...cacheTelemetry, timestamp: new Date().toISOString() });
+      }
+
+      if (streamStartController.signal.aborted || isTerminated || streamController.isIntentionalStop) {
+        await releaseCachedR2Source();
+        return;
+      }
+
       if (refreshSignedInputSource && signedUrlGeneratedAt && signedUrlTtlMs
         && Date.now() >= signedUrlGeneratedAt + signedUrlTtlMs - SIGNED_SOURCE_REFRESH_SKEW_MS) {
         try {
@@ -399,6 +611,11 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           await handleProcessCrash(error, null, null);
           return;
         }
+      }
+
+      if (streamStartController.signal.aborted || isTerminated || streamController.isIntentionalStop) {
+        await releaseCachedR2Source();
+        return;
       }
 
       if (lease?.lost) {
@@ -439,10 +656,43 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         '-i', inputSource,
         '-fflags', '+nobuffer',
         '-flags', '+low_delay',
-        '-muxdelay', '0.1'
+        '-muxdelay', '0.1',
+        '-progress', 'pipe:1',
+        '-nostats'
       );
 
-      if (isVertical) {
+      let copyEligibility = { eligible: false, reason: null, metadata: null };
+      if (forceTranscode) {
+        copyEligibility.reason = 'copy-fallback';
+      } else if (directCopyMode === false) {
+        copyEligibility.reason = 'direct-copy-mode-disabled';
+      } else if (!DIRECT_COPY_ENABLED) {
+        copyEligibility.reason = 'direct-copy-disabled-by-environment';
+      } else {
+        copyEligibility = r2CachedMetadata
+          ? { eligible: !directCopyIneligibility(r2CachedMetadata), reason: directCopyIneligibility(r2CachedMetadata), metadata: r2CachedMetadata }
+          : await probeDirectCopyEligibility(inputSource);
+      }
+      if (copyEligibility.eligible && copyEligibility.metadata
+        && isVertical !== (copyEligibility.metadata.height > copyEligibility.metadata.width)) {
+        copyEligibility.eligible = false;
+        copyEligibility.reason = 'orientation-mismatch';
+      }
+      const useDirectCopy = copyEligibility.eligible && !forceTranscode;
+
+      if (streamStartController.signal.aborted || isTerminated || streamController.isIntentionalStop) {
+        await releaseCachedR2Source();
+        return;
+      }
+
+      if (useDirectCopy) {
+        ffmpegArgs.push(
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '128k',
+          '-ar', '44100'
+        );
+      } else if (isVertical) {
         ffmpegArgs.push(
           '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
           '-c:v', 'libx264',
@@ -458,27 +708,20 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           '-ar', '44100'
         );
       } else {
-        if (directCopyMode !== false) {
-          ffmpegArgs.push(
-            '-c:v', 'copy',
-            '-c:a', 'aac'
-          );
-        } else {
-          ffmpegArgs.push(
-            '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black',
-            '-c:v', 'libx264',
-            '-preset', 'veryfast',
-            '-tune', 'zerolatency',
-            '-b:v', '6000k',
-            '-maxrate', '6500k',
-            '-bufsize', '12000k',
-            '-pix_fmt', 'yuv420p',
-            '-g', '60',
-            '-c:a', 'aac',
-            '-b:a', '160k',
-            '-ar', '44100'
-          );
-        }
+        ffmpegArgs.push(
+          '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black',
+          '-c:v', 'libx264',
+          '-preset', 'veryfast',
+          '-tune', 'zerolatency',
+          '-b:v', '6000k',
+          '-maxrate', '6500k',
+          '-bufsize', '12000k',
+          '-pix_fmt', 'yuv420p',
+          '-g', '60',
+          '-c:a', 'aac',
+          '-b:a', '160k',
+          '-ar', '44100'
+        );
       }
 
       if (activeDestinations.length === 1) {
@@ -504,11 +747,65 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       const currentProcessSequence = ++ffmpegStartSequence;
       telemetryUpdateCount = 0;
       telemetrySequence = 0;
+      if (useDirectCopy) {
+        console.log('[FFmpeg Mode] copy');
+      } else {
+        console.log('[FFmpeg Mode] transcode (' + (isVertical ? 'vertical' : 'landscape') + ') reason=' + copyEligibility.reason);
+      }
+      const attemptUsedDirectCopy = useDirectCopy;
+      const attemptStartedAt = Date.now();
+      let fallbackScheduled = false;
+      let childErrorHandled = false;
+      let progressBuffer = '';
+      let progressRecord = [];
+      let processCpuSample = null;
+      let previousOutputTime = null;
+      let previousProgressFrame = null;
+      let lastOutputAdvanceAt = attemptStartedAt;
+      let lastProgressMetricsWriteAt = 0;
+      let previousDroppedFrames = 0;
+      let stallRecoveryStarted = false;
+      const startCopyFallback = () => {
+        if (!attemptUsedDirectCopy || copyFallbackAttempted || rtmpConfirmed
+          || streamController.isIntentionalStop || isTerminated) return false;
+        copyFallbackAttempted = true;
+        forceTranscode = true;
+        fallbackScheduled = true;
+        if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+        if (progressWatchdogTimer) { clearInterval(progressWatchdogTimer); progressWatchdogTimer = null; }
+        console.warn('[FFmpeg Mode] copy failed, falling back to transcode');
+        void startFfmpegProcess();
+        return true;
+      };
       currentChild = spawn('ffmpeg', ffmpegArgs);
       const pid = currentChild.pid;
 
+      currentChild.once('error', (err) => {
+        if (childErrorHandled) return;
+        childErrorHandled = true;
+        const failedChild = currentChild;
+        const safeError = sanitizeChildProcessError(err, { secrets: sensitiveValues });
+        console.error('[FFmpeg Child Error] Stream ' + streamId + ': ' + safeError);
+        let recoveryHandled = false;
+        const recoverAfterExit = () => {
+          if (recoveryHandled || (failedChild.exitCode == null && failedChild.signalCode == null)) return;
+          recoveryHandled = true;
+          if (!startCopyFallback()) return handleProcessCrash(err, null, null);
+        };
+        void terminateFfmpegChild(failedChild).then((stopped) => {
+          if (stopped) recoverAfterExit();
+          else {
+            failedChild.once('exit', recoverAfterExit);
+            if (failedChild.exitCode != null || failedChild.signalCode != null) recoverAfterExit();
+          }
+        });
+      });
+
       if (!pid) {
-        handleProcessCrash(new Error('Failed to spawn FFmpeg child process'), null, null);
+        if (!childErrorHandled) {
+          childErrorHandled = true;
+          if (!startCopyFallback()) void handleProcessCrash(new Error('Failed to spawn FFmpeg child process'), null, null);
+        }
         return;
       }
 
@@ -536,11 +833,119 @@ async function launchFfmpegStream(job, lease, abortSignal) {
         return;
       }
 
+      const progressWatchdogThresholdMs = Number(process.env.FFMPEG_PROGRESS_STALL_MS) || 30_000;
+      progressWatchdogTimer = setInterval(() => {
+        if (stallRecoveryStarted || isTerminated || streamController.isIntentionalStop) return;
+        if (Date.now() - lastOutputAdvanceAt < progressWatchdogThresholdMs) return;
+        stallRecoveryStarted = true;
+        console.warn('[FFmpeg Watchdog] No advancing output progress for stream ' + streamId + '; restarting FFmpeg.');
+        void terminateFfmpegChild(currentChild, 5000);
+      }, 5000);
+      progressWatchdogTimer.unref?.();
+
+      let rtmpConfirmed = false;
+      const processStartedAt = Date.now();
+      const handleProgressRecord = async (record) => {
+        if (currentProcessSequence !== ffmpegStartSequence || !record.trim()) return;
+        const progress = parseFfmpegProgressRecord(record);
+        const now = Date.now();
+        const outputTimeAdvanced = progress.outputTimeSeconds !== null
+          && (previousOutputTime === null || Math.abs(progress.outputTimeSeconds - previousOutputTime) > 0.001);
+        const frameAdvanced = progress.frame !== null
+          && (previousProgressFrame === null || progress.frame > previousProgressFrame);
+        if (outputTimeAdvanced || frameAdvanced) {
+          if (progress.outputTimeSeconds !== null) previousOutputTime = progress.outputTimeSeconds;
+          if (progress.frame !== null) previousProgressFrame = progress.frame;
+          lastOutputAdvanceAt = now;
+          if (!rtmpConfirmed) telemetryUpdateCount++;
+        }
+
+        const cpuSample = await sampleProcessCpuPercent(pid, processCpuSample);
+        processCpuSample = cpuSample.sample;
+        const ffmpegMemoryMb = await readProcessMemoryMb(pid);
+        const uptimeSeconds = Math.max(0, Math.floor((now - processStartedAt) / 1000));
+        const droppedDelta = progress.droppedFrames === null
+          ? null
+          : Math.max(0, progress.droppedFrames - previousDroppedFrames);
+        if (progress.droppedFrames !== null) previousDroppedFrames = progress.droppedFrames;
+        const telemetryPayload = {
+          streamId,
+          status: rtmpConfirmed ? 'live' : 'starting',
+          ...(progress.bitrateKbps !== null ? { bitrate_kbps: progress.bitrateKbps } : {}),
+          ...(progress.fps !== null ? { fps: progress.fps } : {}),
+          ...(progress.droppedFrames !== null ? { dropped_frames: progress.droppedFrames } : {}),
+          ...(cpuSample.cpuPercent !== null ? { cpu_usage_pct: +cpuSample.cpuPercent.toFixed(2) } : {}),
+          ...(ffmpegMemoryMb !== null ? { mem_usage_mb: ffmpegMemoryMb } : {}),
+          speed: progress.speed === null ? null : `${progress.speed.toFixed(2)}x`,
+          output_time_seconds: progress.outputTimeSeconds,
+          playback_delay_seconds: progress.outputTimeSeconds === null
+            ? null
+            : +(uptimeSeconds - progress.outputTimeSeconds).toFixed(2),
+          health_status: droppedDelta > 0 ? 'warning' : 'good',
+          video_mode: attemptUsedDirectCopy ? 'copy' : 'transcode',
+          transcode_reason: attemptUsedDirectCopy ? null : copyEligibility.reason,
+          uptime_seconds: uptimeSeconds,
+          destinations_count: activeDestinations.length,
+          reconnect_attempts: reconnectAttempts,
+          ...cacheTelemetry,
+          ffmpegStartSequence: currentProcessSequence,
+          sequence: ++telemetrySequence,
+          timestamp: new Date(now).toISOString(),
+        };
+
+        if (!rtmpConfirmed && telemetryUpdateCount >= 3) {
+          const stillOwned = await updateOwnedStream({
+            status: 'live',
+            ffmpeg_pid: pid,
+            last_heartbeat: new Date(now).toISOString(),
+            ...(progress.bitrateKbps !== null ? { current_bitrate_kbps: Math.round(progress.bitrateKbps) } : {}),
+            ...(progress.fps !== null ? { fps: progress.fps } : {}),
+            updated_at: new Date(now).toISOString(),
+          });
+          if (!stillOwned) {
+            await handleLeaseLoss(new Error('Distributed stream ownership was lost while marking FFmpeg live.'));
+            return;
+          }
+          rtmpConfirmed = true;
+          telemetryPayload.status = 'live';
+        }
+
+        await publishTelemetry(telemetryPayload);
+        if (now - lastProgressMetricsWriteAt >= 2000) {
+          lastProgressMetricsWriteAt = now;
+          const updates = {
+            last_heartbeat: new Date(now).toISOString(),
+            updated_at: new Date(now).toISOString(),
+            ...(progress.bitrateKbps !== null ? { current_bitrate_kbps: Math.round(progress.bitrateKbps) } : {}),
+            ...(progress.fps !== null ? { fps: progress.fps } : {}),
+            ...(cpuSample.cpuPercent !== null ? { cpu_usage_pct: +cpuSample.cpuPercent.toFixed(2) } : {}),
+          };
+          const stillOwned = await updateOwnedStream(updates);
+          if (!stillOwned) await handleLeaseLoss(new Error('Distributed stream ownership was lost during telemetry update.'));
+        }
+      };
+
+      currentChild.stdout?.on('data', (chunk) => {
+        progressBuffer += chunk.toString();
+        if (progressBuffer.length > 64 * 1024) progressBuffer = progressBuffer.slice(-16 * 1024);
+        const lines = progressBuffer.split(/\r?\n/);
+        progressBuffer = lines.pop() || '';
+        for (const line of lines) {
+          progressRecord.push(line);
+          if (line.startsWith('progress=')) {
+            const record = progressRecord.join('\n');
+            progressRecord = [];
+            void handleProgressRecord(record).catch(() => {});
+          }
+        }
+      });
+
       // Independent heartbeat: keep last_heartbeat fresh in Supabase even when
       // FFmpeg stderr is silent, so a stale owner cannot steal the stream.
       const HEARTBEAT_INTERVAL_MS = 5000;
       const refreshHeartbeat = async () => {
-        if (isTerminated || streamController.isIntentionalStop) return;
+        if ((isTerminated || streamController.isIntentionalStop)
+          && (!currentChild || currentChild.exitCode != null || currentChild.signalCode != null)) return;
         try {
           const stillOwned = await updateOwnedStream({
             last_heartbeat: new Date().toISOString(),
@@ -558,12 +963,8 @@ async function launchFfmpegStream(job, lease, abortSignal) {
       refreshHeartbeat();
       heartbeatTimer = setInterval(refreshHeartbeat, HEARTBEAT_INTERVAL_MS);
 
-      // Track whether RTMP connection has been confirmed via first telemetry.
-      let rtmpConfirmed = false;
-
-      // Stream-specific stderr telemetry feed via Redis Pub/Sub
-      let lastTelemetryUpdate = 0;
-    let lastCpuUsage = { user: 0, system: 0 };
+      // stderr is retained for sanitized diagnostics; all live metrics come
+      // from FFmpeg's structured -progress output on stdout.
       currentChild.stderr?.on('data', async (chunk) => {
         const raw = chunk.toString();
         for (const diagnostic of extractFfmpegErrorLines(raw, { secrets: sensitiveValues })) {
@@ -572,285 +973,35 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           if (recentFfmpegDiagnostics.length > MAX_FFMPEG_DIAGNOSTICS) recentFfmpegDiagnostics.shift();
           console.warn("[FFmpeg Diagnostic] Stream " + streamId + ": " + diagnostic);
         }
-        const now = Date.now();
-        const bitrateMatch = raw.match(/bitrate=\s*([0-9.]+kbits\/s)/);
-        const fpsMatch = raw.match(/fps=\s*([0-9.]+)/);
-        const dropMatch = raw.match(/drop=\s*([0-9]+)/);
-
-        if (now - lastTelemetryUpdate > 2000) {
-          lastTelemetryUpdate = now;
-          const memUsage = process.memoryUsage();
-          const currentBitrate = bitrateMatch ? parseInt(bitrateMatch[1], 10) : 6000;
-          const currentFps = fpsMatch ? parseFloat(fpsMatch[1]) : 60.0;
-          const droppedFrames = dropMatch ? parseInt(dropMatch[1], 10) : 0;
-          // Genuine CPU measurement using process.cpuUsage() with elapsed wall-clock time.
-          // Tracks previous reading to calculate percentage over time.
-          const cpuUsageNow = process.cpuUsage ? process.cpuUsage() : { user: 0, system: 0 };
-          const cpuDelta = (typeof lastCpuUsage === 'object' && lastCpuUsage.user !== undefined)
-            ? cpuUsageNow.user + cpuUsageNow.system - lastCpuUsage.user - lastCpuUsage.system
-            : cpuUsageNow.user + cpuUsageNow.system;
-          const wallDelta = now - (lastTelemetryUpdate > 0 ? lastTelemetryUpdate : now);
-          const cpuUsagePct = wallDelta > 0 ? Math.min(100, (cpuDelta / wallDelta) * 100) : 0;
-          // Store for next measurement
-          lastCpuUsage = cpuUsageNow;
-          const memMb = +(memUsage.rss / (1024 * 1024)).toFixed(1);
-
-          const telemetryPayload = {
-            streamId,
-            bitrate_kbps: currentBitrate,
-            fps: currentFps,
-            dropped_frames: droppedFrames,
-            cpu_usage_pct: cpuUsagePct,
-            mem_usage_mb: memMb,
-            health_status: droppedFrames > 5 ? 'warning' : 'excellent',
-            speed: '1.00x',
-            destinations_count: activeDestinations.length,
-            reconnect_attempts: reconnectAttempts,
-            ffmpegStartSequence: currentProcessSequence,
-            sequence: ++telemetrySequence,
-            timestamp: new Date().toISOString(),
-          };
-
-          // Ignore events from an older FFmpeg process (stale telemetry).
-          if (currentProcessSequence !== ffmpegStartSequence) {
-            return;
-          }
-
-          // Sustained telemetry check: require 3 consecutive updates before marking 'live'.
-          // A single bitrate/fps line only means encoding started, not that RTMP output succeeded.
-          if (!rtmpConfirmed && (bitrateMatch || fpsMatch)) {
-            telemetryUpdateCount++;
-            if (telemetryUpdateCount >= 3) {
-              rtmpConfirmed = true;
-              try {
-                const stillOwned = await updateOwnedStream({
-                  status: 'live',
-                  ffmpeg_pid: pid,
-                  last_heartbeat: new Date().toISOString(),
-                  current_bitrate_kbps: currentBitrate,
-                  fps: currentFps,
-                  updated_at: new Date().toISOString(),
-                });
-                if (!stillOwned) {
-                  await handleLeaseLoss(new Error('Distributed stream ownership was lost while marking FFmpeg live.'));
-                  return;
-                }
-              } catch {
-                await handleLeaseLoss(new Error('Distributed stream ownership could not be verified while marking FFmpeg live.'));
-                return;
-              }
-              try {
-                await redisClient.publish('stream-telemetry-events', JSON.stringify({
-                  streamId,
-                  status: 'live',
-                  health_status: telemetryPayload.health_status,
-                  bitrate_kbps: currentBitrate,
-                  fps: currentFps,
-                  timestamp: new Date().toISOString(),
-                }));
-              } catch (pubErr) {
-                console.warn('[Redis Notice] Failed publishing live for ' + streamId + ':', pubErr.message);
-              }
-            }
-          } else if (!rtmpConfirmed) {
-            telemetryUpdateCount = 0;
-          }
-
-          try {
-            await redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify(telemetryPayload));
-            await redisClient.publish('stream-telemetry-events', JSON.stringify(telemetryPayload));
-          } catch (pubErr) {}
-
-          try {
-            const stillOwned = await updateOwnedStream({
-              last_heartbeat: new Date().toISOString(),
-              current_bitrate_kbps: currentBitrate,
-              fps: currentFps,
-              cpu_usage_pct: cpuUsagePct,
-              mem_usage_mb: memMb,
-              updated_at: new Date().toISOString(),
-            });
-            if (!stillOwned) await handleLeaseLoss(new Error('Distributed stream ownership was lost during heartbeat.'));
-          } catch {
-            // Transient DB error: keep streaming; Redis lease is still valid.
-          }
-        }
-      });
-
-      currentChild.on('error', (err) => {
-        const safeError = sanitizeChildProcessError(err, { secrets: sensitiveValues });
-        const errorMsg = 'FFmpeg child process error: ' + safeError;
-        console.error('[FFmpeg Child Error] Stream ' + streamId + ': ' + errorMsg);
-        // Clear 'starting' state and mark as failed
-        try {
-          void updateOwnedStream({
-            status: 'failed',
-            last_error: errorMsg,
-            ffmpeg_pid: null,
-            updated_at: new Date().toISOString(),
-          }, true);
-        } catch {}
-        try {
-          void redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
-            streamId,
-            status: 'failed',
-            health_status: 'error',
-            last_error: errorMsg,
-            timestamp: new Date().toISOString(),
-          }));
-          void redisClient.publish('stream-telemetry-events', JSON.stringify({
-            streamId,
-            status: 'failed',
-            health_status: 'error',
-            last_error: errorMsg,
-            timestamp: new Date().toISOString(),
-          }));
-        } catch {}
       });
 
       currentChild.on('exit', async (code, signal) => {
-        if (leaseLostError) return;
+        if (leaseLostError || childErrorHandled) return;
+        if (startCopyFallback()) return;
         if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-        // Always clear the 'starting' state regardless of outcome
-        try {
-          await updateOwnedStream({
-            status: 'idle',
-            ffmpeg_pid: null,
-            last_error: null,
-            updated_at: new Date().toISOString(),
-          }, true);
-        } catch {}
-        // Also publish clearing the starting state via Redis
-        try {
-          void redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
-            streamId,
-            status: 'idle',
-            health_status: 'warning',
-            bitrate_kbps: 0,
-            fps: 0,
-            timestamp: new Date().toISOString(),
-          }));
-          void redisClient.publish('stream-telemetry-events', JSON.stringify({
-            streamId,
-            status: 'idle',
-            health_status: 'warning',
-            bitrate_kbps: 0,
-            fps: 0,
-            timestamp: new Date().toISOString(),
-          }));
-        } catch {}
+        if (progressWatchdogTimer) { clearInterval(progressWatchdogTimer); progressWatchdogTimer = null; }
 
         if (streamController.isIntentionalStop || isTerminated) {
-          // Stream was intentionally stopped or terminated - mark as idle, not live
           try {
-            void updateOwnedStream({
+            await updateOwnedStream({
               status: 'idle',
               ffmpeg_pid: null,
               last_error: null,
               updated_at: new Date().toISOString(),
             }, true);
           } catch {}
-          try {
-            void redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
-              streamId,
-              status: 'idle',
-              health_status: 'warning',
-              bitrate_kbps: 0,
-              fps: 0,
-              timestamp: new Date().toISOString(),
-            }));
-            void redisClient.publish('stream-telemetry-events', JSON.stringify({
-              streamId,
-              status: 'idle',
-              health_status: 'warning',
-              bitrate_kbps: 0,
-              fps: 0,
-              timestamp: new Date().toISOString(),
-            }));
-          } catch {}
+          await publishTelemetry({ streamId, status: 'idle', health_status: 'warning', timestamp: new Date().toISOString() });
+          await releaseCachedR2Source();
           console.log(`[FFmpeg Exit] Stream ${streamId} idle (intentionally stopped/terminated)`);
           resolve();
-        } else if (code === 0 && !signal) {
-          // Success: FFmpeg exited cleanly with exit code 0 and no signal
-          try {
-            void updateOwnedStream({
-              status: 'live',
-              ffmpeg_pid: null,
-              last_heartbeat: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            }, true);
-          } catch {}
-          try {
-            void redisClient.publish('stream-telemetry-events', JSON.stringify({
-              streamId,
-              status: 'live',
-              health_status: 'excellent',
-              bitrate_kbps: 0,
-              fps: 0,
-              timestamp: new Date().toISOString(),
-            }));
-          } catch {}
-          console.log(`[FFmpeg Exit] Stream ${streamId} live (exit code: ${code}, signal: ${signal})`);
-          resolve();
         } else {
-          // Failure: unexpected crash, non-zero exit code, or network drop
-          const exitMsg = `FFmpeg exited with code ${code}, signal ${signal}`;
-          console.error(`[FFmpeg Exit Error] Stream ${streamId}: ${exitMsg}`);
-          try {
-            void updateOwnedStream({
-              status: 'failed',
-              last_error: exitMsg,
-              ffmpeg_pid: null,
-              updated_at: new Date().toISOString(),
-            }, true);
-          } catch {}
-          try {
-            void redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
-              streamId,
-              status: 'failed',
-              health_status: 'error',
-              last_error: exitMsg,
-              timestamp: new Date().toISOString(),
-            }));
-            void redisClient.publish('stream-telemetry-events', JSON.stringify({
-              streamId,
-              status: 'failed',
-              health_status: 'error',
-              last_error: exitMsg,
-              timestamp: new Date().toISOString(),
-            }));
-          } catch {}
+          // A non-intentional process exit is not a healthy live stream, even if
+          // FFmpeg returns code 0 (e.g. the source ended before the loop resumed).
+          await handleProcessCrash(new Error(`FFmpeg exited with code ${code}, signal ${signal}`), code, signal);
         }
       });
       currentChild.on('close', (code) => {
-        // Always clear the 'starting' state on close
-        try {
-          void updateOwnedStream({
-            status: 'idle',
-            ffmpeg_pid: null,
-            last_error: null,
-            updated_at: new Date().toISOString(),
-          }, true);
-        } catch {}
-        try {
-          void redisClient.publish(`stream:telemetry:${streamId}`, JSON.stringify({
-            streamId,
-            status: 'idle',
-            health_status: 'warning',
-            bitrate_kbps: 0,
-            fps: 0,
-            timestamp: new Date().toISOString(),
-          }));
-          void redisClient.publish('stream-telemetry-events', JSON.stringify({
-            streamId,
-            status: 'idle',
-            health_status: 'warning',
-            bitrate_kbps: 0,
-            fps: 0,
-            timestamp: new Date().toISOString(),
-          }));
-        } catch {}
-        console.log(`[FFmpeg Close] Stream ${streamId} starting state cleared (close code: ${code})`);
+        if (!fallbackScheduled) console.log(`[FFmpeg Close] Stream ${streamId} process closed (code: ${code})`);
       });
     }
 
@@ -861,9 +1012,12 @@ async function launchFfmpegStream(job, lease, abortSignal) {
     // - Permanent failure after 5 attempts -> status: 'ERROR', detailed failure log
     // ------------------------------------------------------------------------
     async function handleProcessCrash(error, code, signal) {
+      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+      if (progressWatchdogTimer) { clearInterval(progressWatchdogTimer); progressWatchdogTimer = null; }
       if (isTerminated || streamController.isIntentionalStop) {
         activeStreams.delete(streamId);
         abortSignal?.removeEventListener('abort', handleAbort);
+        await releaseCachedR2Source();
         resolve();
         return;
       }
@@ -917,14 +1071,12 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           return;
         }
 
-        reconnectTimeout = setTimeout(() => {
-          if (!isTerminated && !streamController.isIntentionalStop) {
-            startFfmpegProcess();
-          } else {
-            activeStreams.delete(streamId);
-            resolve();
-          }
-        }, backoffDelay);
+        reconnectTimeout = scheduleRestartAfterExit({
+          child: currentChild,
+          delayMs: backoffDelay,
+          shouldRestart: () => !isTerminated && !streamController.isIntentionalStop,
+          restart: startFfmpegProcess,
+        });
       } else {
         // Permanent failure: All 5 restart retries exhausted
         isTerminated = true;
@@ -993,6 +1145,7 @@ async function launchFfmpegStream(job, lease, abortSignal) {
           return;
         }
 
+        await releaseCachedR2Source();
         reject(new Error(permanentFailureLog));
       }
     }
@@ -1173,29 +1326,20 @@ async function shutdownWorker(signal) {
     pendingStart.abortController.abort();
   }
 
-  // Terminate active child processes gracefully with SIGTERM
-  const stopPromises = Array.from(activeStreams.keys()).map((streamId) =>
-    stopStreamProcess(streamId, `Worker container recycle (${signal})`)
-  );
-
-  // Also release Redis locks and reset Supabase status for all streams
-  await Promise.all(
-    Array.from(activeStreams.keys()).map((streamId) =>
-      releaseStreamLockAndReset(streamId, 'idle')
-    )
-  );
-
-  await Promise.all(stopPromises);
-
-  // All stream processors have now settled, so close can drain safely.
-  try {
-    await streamWorker.close();
-  } catch (e) {}
-
-  try {
-    await subClient.quit();
-    await redisClient.quit();
-  } catch (e) {}
+  // Each stream stop releases its fenced ownership claim only after FFmpeg exit
+  // is confirmed. Never clear claims ahead of child termination during recycle.
+  const stopped = await stopStreamsThenClose({
+    streamIds: Array.from(activeStreams.keys()),
+    stopStream: (streamId) => stopStreamProcess(streamId, `Worker container recycle (${signal})`),
+    closeResources: async () => {
+      try { await streamWorker.close(); } catch {}
+      try { await subClient.quit(); await redisClient.quit(); } catch {}
+    },
+  });
+  if (!stopped) {
+    console.error('[Shutdown] At least one FFmpeg exit is unconfirmed; retaining worker ownership and Redis connections.');
+    return;
+  }
 
   console.log('[Shutdown] All worker resources cleaned up. Exiting process.');
   process.exit(signal === 'MEMORY_CEILING_GUARD' ? 1 : 0);

@@ -10,6 +10,7 @@ import dotenv from 'dotenv';
 import multer from 'multer';
 import fs from 'fs';
 import path from 'path';
+import os from 'node:os';
 import { spawn, ChildProcess } from 'child_process';
 import { createServer as createViteServer } from 'vite';
 import { createClient } from '@supabase/supabase-js';
@@ -24,6 +25,12 @@ import { extractFfmpegErrorLines, sanitizeChildProcessError, sanitizeFfmpegDiagn
 import { buildStreamDestinations, validateStreamConfiguration } from './backend/streamDestinations.js';
 import { claimStreamOwnership, isStaleHeartbeat, reconcileStaleStreamRecords, updateStreamWhenOwned } from './backend/streamOwnership.js';
 import { countActiveStreams, reconcileLocalStreamState } from './backend/streamQuota.js';
+import { parseR2ObjectUrl, normalizeR2ObjectKey } from './backend/r2ObjectUrl.js';
+import { acquireVideoCache, cleanupOrphanedVideoCacheFiles, createInProcessCacheLockProvider, getVideoCacheStats } from './backend/videoCache.js';
+import { downloadVideoToLocalFile } from './backend/localVideoSource.js';
+import { parseFfmpegProgressRecord, probeFfmpegVideoMetadata, readProcessMemoryMb, sampleProcessCpuPercent } from './backend/ffmpegProgress.js';
+import { scheduleRestartAfterExit } from './backend/ffmpegLifecycle.js';
+import { getCacheFallbackReason, retryCachePreparation } from './backend/cacheFallback.js';
 import {
   clusterRegistry,
   TIER_RESOURCE_PROFILES,
@@ -354,11 +361,30 @@ export interface StreamDestination {
 export interface StreamTelemetryData {
   bitrate_kbps: number;
   fps: number;
-  dropped_frames: number;
-  cpu_usage_pct: number;
-  mem_usage_mb: number;
-  health_status: 'excellent' | 'good' | 'warning' | 'critical';
-  speed: string;
+  dropped_frames: number | null;
+  cpu_usage_pct: number | null;
+  mem_usage_mb: number | null;
+  health_status: 'excellent' | 'good' | 'warning' | 'critical' | 'unknown';
+  speed: string | null;
+  output_time_seconds?: number | null;
+  playback_delay_seconds?: number | null;
+  video_mode?: 'copy' | 'transcode' | null;
+  transcode_reason?: string | null;
+  cache_status?: string | null;
+  cache_fallback_reason?: string | null;
+  cache_progress_pct?: number | null;
+  cache_bytes_downloaded?: number | null;
+  cache_total_bytes?: number | null;
+  input_download_mbps?: number | null;
+  cache_disk_total_bytes?: number | null;
+  cache_disk_available_bytes?: number | null;
+  cache_disk_used_bytes?: number | null;
+  cache_used_bytes?: number | null;
+  cache_video_count?: number | null;
+  cached_video_width?: number | null;
+  cached_video_height?: number | null;
+  cached_video_codec?: string | null;
+  reconnect_attempts?: number | null;
   uptime_seconds: number;
   destinations_count: number;
   timestamp: string;
@@ -916,13 +942,59 @@ interface ActiveWorkerProcess {
   reconnectTimeout?: NodeJS.Timeout;
   reconnectAttempts?: number;
   isIntentionalStop?: boolean;
+  stopRequestInProgress?: boolean;
   telemetry?: StreamTelemetryData;
+  cacheAbortController?: AbortController;
+  cacheRelease?: () => Promise<void>;
+  cacheStatus?: string;
+  directCopyMode?: boolean;
+  cacheStatus?: string;
   containerId?: string;
   tier?: string;
   routingMetadata?: any;
 }
 const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
+const localVideoCacheLockProvider = createInProcessCacheLockProvider();
 const localStartClaims = new Set<string>();
+
+async function terminateChildAndWait(child: ChildProcess | null, gracePeriodMs = 5000): Promise<boolean> {
+  if (!child || child.exitCode != null || child.signalCode != null) return true;
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    let finalTimer: NodeJS.Timeout | undefined;
+    const finish = (exited: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(forceKillTimer);
+      if (finalTimer) clearTimeout(finalTimer);
+      child.removeListener('close', finish);
+      child.removeListener('exit', finish);
+      resolve(exited);
+    };
+    const forceKillTimer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch {}
+      finalTimer = setTimeout(() => finish(false), 5000);
+    }, gracePeriodMs);
+    forceKillTimer.unref?.();
+    child.once('close', () => finish(true));
+    child.once('exit', () => finish(true));
+    try { child.kill('SIGTERM'); } catch { finish(false); }
+  });
+}
+
+async function terminateAndReleaseCache(process: ActiveWorkerProcess) {
+  const child = process.child;
+  const exited = await terminateChildAndWait(child);
+  const exitConfirmed = exited || !child || child.exitCode != null || child.signalCode != null;
+  if (exitConfirmed) {
+    await process.cacheRelease?.();
+    process.cacheRelease = undefined;
+  } else {
+    child?.once('close', () => { void process.cacheRelease?.(); });
+    child?.once('exit', () => { void process.cacheRelease?.(); });
+  }
+  return exitConfirmed;
+}
 
 async function updateClaimedStream(
   streamId: string,
@@ -952,11 +1024,12 @@ async function updateClaimedStream(
 function stopProcessAfterOwnershipLoss(streamId: string, process: ActiveWorkerProcess, reason: string) {
   if (activeWorkerProcesses.get(streamId) !== process) return;
   process.isIntentionalStop = true;
+  process.cacheAbortController?.abort();
   if (process.reconnectTimeout) clearTimeout(process.reconnectTimeout);
   if (process.intervalId) clearInterval(process.intervalId);
   if (process.containerId) clusterRegistry.releaseStreamJob(process.containerId);
   activeWorkerProcesses.delete(streamId);
-  try { process.child?.kill('SIGTERM'); } catch {}
+  void terminateAndReleaseCache(process);
   console.warn(`[Stream ${streamId}] ${reason}; FFmpeg was stopped before it could overwrite another owner.`);
 }
 
@@ -3581,14 +3654,13 @@ app.delete('/api/streams/:id', async (req, res) => {
     const active = activeWorkerProcesses.get(id);
     if (active) {
       active.isIntentionalStop = true;
+      active.cacheAbortController?.abort();
       if (active.containerId) {
         clusterRegistry.releaseStreamJob(active.containerId);
       }
       if (active.reconnectTimeout) clearTimeout(active.reconnectTimeout);
       if (active.intervalId) clearInterval(active.intervalId);
-      if (active.child) {
-        try { active.child.kill('SIGTERM'); } catch (e) {}
-      }
+      await terminateAndReleaseCache(active);
       activeWorkerProcesses.delete(id);
     }
 
@@ -3734,6 +3806,7 @@ app.post('/api/streams/:id/start', async (req, res) => {
       destinations: stream.destinations,
       subscriptionTier: userTier,
     });
+    let actualVideoMode: 'copy' | 'transcode' = 'transcode';
 
     const activeStorageAdapter = getStorageProvider();
     const initialLogs: string[] = [
@@ -3746,11 +3819,12 @@ app.post('/api/streams/:id/start', async (req, res) => {
       `[source] Video input: ${sanitizeFfmpegDiagnostic(stream.video_url, { secrets: sensitiveStreamValues, maxLength: 300 })}`,
       `[multi-casting] Broadcasting simultaneously to ${finalDestinationsList.length} destination(s) [Tier Limit: ${maxAllowedDestinations}]`,
       `[target] Primary server: ${sanitizeFfmpegDiagnostic(stream.rtmp_server_url || 'rtmp://a.rtmp.youtube.com/live2', { secrets: sensitiveStreamValues })}`,
-      `[flags] Direct-Copy active (-re -stream_loop -1 -i <source> -c:v copy -c:a aac)`,
+      '[flags] FFmpeg video mode will be selected after source compatibility checks.',
     ];
 
     // Resolve local file path if video_url points to uploaded asset
     let inputSource = stream.video_url;
+    let r2CacheSource: { provider: ReturnType<typeof getStorageProvider>; objectKey: string; expectedBytes: number; etag?: string | null; lastModified?: string | null } | null = null;
     if (stream.video_url.includes('/uploads/')) {
       const fileName = stream.video_url.split('/uploads/')[1]?.split('?')[0];
       const localFile = path.join(UPLOADS_DIR, fileName);
@@ -3758,13 +3832,59 @@ app.post('/api/streams/:id/start', async (req, res) => {
         inputSource = localFile;
       }
     } else if (stream.video_url && !stream.video_url.startsWith('http://') && !stream.video_url.startsWith('https://')) {
-      const cleanPath = stream.video_url.replace(/^(stream-assets|live-stream-assets)\//, '').replace(/^\/+/, '');
-      const localCandidate = path.join(UPLOADS_DIR, path.basename(cleanPath));
-      if (fs.existsSync(localCandidate)) {
-        inputSource = localCandidate;
+      if (activeStorageAdapter.providerType === 'r2') {
+        const r2Provider = getStorageProvider('r2');
+        const objectKey = normalizeR2ObjectKey(stream.video_url, r2Provider.bucketName);
+        const metadata = typeof r2Provider.headObject === 'function'
+          ? await r2Provider.headObject(objectKey)
+          : null;
+        if (metadata) {
+          r2CacheSource = {
+            provider: r2Provider,
+            objectKey,
+            expectedBytes: Number(metadata.ContentLength),
+            etag: metadata.ETag || null,
+            lastModified: metadata.LastModified instanceof Date ? metadata.LastModified.toISOString() : null,
+          };
+          inputSource = '[R2 source will be cached locally]';
+        }
       } else {
-        const publicUrl = activeStorageAdapter.getPublicUrl(cleanPath);
-        if (publicUrl) inputSource = publicUrl;
+        const cleanPath = stream.video_url.replace(/^(stream-assets|live-stream-assets)\//, '').replace(/^\/+/, '');
+        const localCandidate = path.join(UPLOADS_DIR, path.basename(cleanPath));
+        if (fs.existsSync(localCandidate)) {
+          inputSource = localCandidate;
+        } else {
+          const publicUrl = activeStorageAdapter.getPublicUrl(cleanPath);
+          if (publicUrl) inputSource = publicUrl;
+        }
+      }
+    } else if (typeof stream.video_url === 'string') {
+      try {
+        const r2Provider = getStorageProvider('r2');
+        const accountId = process.env.CLOUDFLARE_R2_ACCOUNT_ID || '';
+        const r2Object = parseR2ObjectUrl(stream.video_url, {
+          bucket: r2Provider.bucketName,
+          endpoint: process.env.CLOUDFLARE_R2_ENDPOINT || (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : ''),
+          publicDomain: process.env.CLOUDFLARE_R2_PUBLIC_DOMAIN || '',
+        });
+        const objectKey = r2Object?.key
+          || (activeStorageAdapter.providerType === 'r2'
+            && !/^https?:\/\//i.test(stream.video_url)
+            ? normalizeR2ObjectKey(stream.video_url, r2Provider.bucketName)
+            : null);
+        if (objectKey && typeof r2Provider.headObject === 'function') {
+          const metadata = await r2Provider.headObject(objectKey);
+          r2CacheSource = {
+            provider: r2Provider,
+            objectKey,
+            expectedBytes: Number(metadata.ContentLength),
+            etag: metadata.ETag || null,
+            lastModified: metadata.LastModified instanceof Date ? metadata.LastModified.toISOString() : null,
+          };
+          inputSource = '[R2 source will be cached locally]';
+        }
+      } catch {
+        // Keep legacy direct source resolution available when R2 cannot be inspected.
       }
     }
 
@@ -3773,12 +3893,46 @@ app.post('/api/streams/:id/start', async (req, res) => {
     const MAX_RESTART_RETRIES = 5;
     const BASE_RECONNECT_DELAY_MS = 3000;
     let reconnectAttempts = 0;
+    let copyFallbackAttempted = false;
+    let streamForceTranscode = false;
+    const isProcessStartCancelled = () => {
+      const current = activeWorkerProcesses.get(id);
+      return !current || current.claimToken !== claimToken || current.isIntentionalStop
+        || current.stopRequestInProgress || current.cacheAbortController?.signal.aborted;
+    };
 
     // Spawns FFmpeg with Zero-Lag and Low-Latency configuration
-    const spawnProcess = (): boolean => {
+    const spawnProcess = async (): Promise<boolean> => {
       try {
+        if (isProcessStartCancelled()) return false;
+        if (refreshDirectR2Input) {
+          inputSource = await refreshDirectR2Input();
+          if (!inputSource) throw new Error('R2 fallback URL refresh failed.');
+          if (isProcessStartCancelled()) return false;
+        }
         const isVertical = stream.orientation === 'vertical';
         const isHttpSource = inputSource.startsWith('http://') || inputSource.startsWith('https://');
+
+        let copyReason = stream.direct_copy_mode === false
+          ? 'direct-copy-mode-disabled'
+          : process.env.DIRECT_COPY_ENABLED === 'false'
+            ? 'direct-copy-disabled-by-environment'
+            : null;
+        let copyMetadata: Awaited<ReturnType<typeof probeFfmpegVideoMetadata>> | null = null;
+        if (!copyReason) {
+          try {
+            copyMetadata = await probeFfmpegVideoMetadata(inputSource);
+            copyReason = directCopyIneligibility(copyMetadata);
+            if (!copyReason && copyMetadata && isVertical !== (copyMetadata.height > copyMetadata.width)) {
+              copyReason = 'orientation-mismatch';
+            }
+          } catch (error: any) {
+            copyReason = error?.message?.includes('timed out') ? 'ffprobe-timeout' : 'ffprobe-error';
+          }
+        }
+        if (isProcessStartCancelled()) return false;
+        const useDirectCopy = !copyReason && !streamForceTranscode;
+        actualVideoMode = useDirectCopy ? 'copy' : 'transcode';
 
         const ffmpegArgs: string[] = [
           '-re',
@@ -3801,10 +3955,14 @@ app.post('/api/streams/:id/start', async (req, res) => {
           '-i', inputSource,
           '-fflags', '+nobuffer',
           '-flags', '+low_delay',
-          '-muxdelay', '0.1'
+          '-muxdelay', '0.1',
+          '-progress', 'pipe:1',
+          '-nostats'
         );
 
-        if (isVertical) {
+        if (useDirectCopy) {
+          ffmpegArgs.push('-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ar', '44100');
+        } else if (isVertical) {
           ffmpegArgs.push(
             '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
             '-c:v', 'libx264',
@@ -3820,27 +3978,38 @@ app.post('/api/streams/:id/start', async (req, res) => {
             '-ar', '44100'
           );
         } else {
-          if (stream.direct_copy_mode) {
-            ffmpegArgs.push(
-              '-c:v', 'copy',
-              '-c:a', 'aac'
-            );
-          } else {
-            ffmpegArgs.push(
-              '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black',
-              '-c:v', 'libx264',
-              '-preset', 'veryfast',
-              '-tune', 'zerolatency',
-              '-b:v', '6000k',
-              '-maxrate', '6500k',
-              '-bufsize', '12000k',
-              '-pix_fmt', 'yuv420p',
-              '-g', '60',
-              '-c:a', 'aac',
-              '-b:a', '160k',
-              '-ar', '44100'
-            );
-          }
+          ffmpegArgs.push(
+            '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black',
+            '-c:v', 'libx264',
+            '-preset', 'veryfast',
+            '-tune', 'zerolatency',
+            '-b:v', '6000k',
+            '-maxrate', '6500k',
+            '-bufsize', '12000k',
+            '-pix_fmt', 'yuv420p',
+            '-g', '60',
+            '-c:a', 'aac',
+            '-b:a', '160k',
+            '-ar', '44100'
+          );
+        }
+
+        console.log(useDirectCopy
+          ? `[FFmpeg Mode] copy for stream ${id}`
+          : `[FFmpeg Mode] transcode (${isVertical ? 'vertical' : 'landscape'}) reason=${copyReason || 'copy-fallback'}`);
+        const modeProcess = activeWorkerProcesses.get(id);
+        if (modeProcess?.claimToken === claimToken && modeProcess.telemetry) {
+          modeProcess.telemetry = {
+            ...modeProcess.telemetry,
+            video_mode: actualVideoMode,
+            transcode_reason: useDirectCopy ? null : copyReason || 'copy-fallback',
+            timestamp: new Date().toISOString(),
+          };
+          modeProcess.logs.push(useDirectCopy
+            ? '[FFmpeg Mode] copy'
+            : `[FFmpeg Mode] transcode (${isVertical ? 'vertical' : 'landscape'}) reason=${copyReason || 'copy-fallback'}`);
+          if (modeProcess.logs.length > 100) modeProcess.logs.shift();
+          broadcastTelemetry(id, modeProcess.telemetry);
         }
 
         if (finalDestinationsList.length === 1) {
@@ -3859,9 +4028,14 @@ app.post('/api/streams/:id/start', async (req, res) => {
           );
         }
 
+        const attemptUsedDirectCopy = useDirectCopy;
+        const attemptStartedAt = Date.now();
         const child = spawn('ffmpeg', ffmpegArgs);
         const childPid = child.pid || null;
         if (!childPid) {
+          child.once('error', (error) => {
+            console.warn(`[FFmpeg Spawn] ${sanitizeChildProcessError(error, { secrets: sensitiveStreamValues })}`);
+          });
           try { child.kill('SIGTERM'); } catch {}
           throw new Error('FFmpeg did not return a process ID.');
         }
@@ -3877,6 +4051,89 @@ app.post('/api/streams/:id/start', async (req, res) => {
           currentActive.child = child;
           currentActive.pid = childPid;
         }
+
+        let progressBuffer = '';
+        let progressRecord: string[] = [];
+        let cpuSample: { processTicks: number; totalTicks: number } | null = null;
+        let previousOutputTime: number | null = null;
+        let previousFrame: number | null = null;
+        let previousDroppedFrames = 0;
+        let confirmedLive = false;
+        let progressCount = 0;
+        let lastMetricsWriteAt = 0;
+        let lastOutputAdvanceAt = attemptStartedAt;
+        let progressWatchdogTimer: NodeJS.Timeout | null = null;
+        const handleProgress = async (record: string) => {
+          const proc = activeWorkerProcesses.get(id);
+          if (!proc || proc.claimToken !== claimToken || proc.child !== child) return;
+          const progress = parseFfmpegProgressRecord(record);
+          const now = Date.now();
+          const advanced = (progress.frame !== null && (previousFrame === null || progress.frame > previousFrame))
+            || (progress.outputTimeSeconds !== null
+              && (previousOutputTime === null || Math.abs(progress.outputTimeSeconds - previousOutputTime) > 0.001));
+          if (advanced) lastOutputAdvanceAt = now;
+          if (progress.frame !== null) previousFrame = progress.frame;
+          if (progress.outputTimeSeconds !== null) previousOutputTime = progress.outputTimeSeconds;
+          if (advanced && !confirmedLive && ++progressCount >= 3) confirmedLive = true;
+
+          const sampledCpu = await sampleProcessCpuPercent(childPid, cpuSample);
+          cpuSample = sampledCpu.sample;
+          const ffmpegMemoryMb = await readProcessMemoryMb(childPid);
+          const uptimeSeconds = Math.max(0, Math.floor((now - proc.startedAt.getTime()) / 1000));
+          const droppedDelta = progress.droppedFrames === null
+            ? null
+            : Math.max(0, progress.droppedFrames - previousDroppedFrames);
+          if (progress.droppedFrames !== null) previousDroppedFrames = progress.droppedFrames;
+
+          proc.telemetry = {
+            ...proc.telemetry,
+            ...(progress.bitrateKbps !== null ? { bitrate_kbps: progress.bitrateKbps } : {}),
+            ...(progress.fps !== null ? { fps: progress.fps } : {}),
+            ...(progress.droppedFrames !== null ? { dropped_frames: progress.droppedFrames } : {}),
+            ...(sampledCpu.cpuPercent !== null ? { cpu_usage_pct: +sampledCpu.cpuPercent.toFixed(2) } : {}),
+            ...(ffmpegMemoryMb !== null ? { mem_usage_mb: ffmpegMemoryMb } : {}),
+            health_status: droppedDelta === null ? proc.telemetry?.health_status || 'unknown' : droppedDelta > 0 ? 'warning' : 'good',
+            speed: progress.speed === null ? null : `${progress.speed.toFixed(2)}x`,
+            output_time_seconds: progress.outputTimeSeconds,
+            playback_delay_seconds: progress.outputTimeSeconds === null
+              ? null
+              : +Math.max(0, (now - proc.startedAt.getTime()) / 1000 - progress.outputTimeSeconds).toFixed(2),
+            video_mode: actualVideoMode,
+            uptime_seconds: uptimeSeconds,
+            timestamp: new Date(now).toISOString(),
+          };
+          broadcastTelemetry(id, proc.telemetry);
+
+          if (now - lastMetricsWriteAt >= 2000) {
+            lastMetricsWriteAt = now;
+            const updates: Record<string, unknown> = {
+              status: confirmedLive ? 'live' : 'starting',
+              last_heartbeat: new Date(now).toISOString(),
+              uptime_seconds: uptimeSeconds,
+              current_bitrate_kbps: progress.bitrateKbps === null ? undefined : Math.round(progress.bitrateKbps),
+              fps: progress.fps === null ? undefined : progress.fps,
+                cpu_usage_pct: sampledCpu.cpuPercent === null ? undefined : +sampledCpu.cpuPercent.toFixed(2),
+                mem_usage_mb: ffmpegMemoryMb === null ? undefined : ffmpegMemoryMb,
+              updated_at: new Date(now).toISOString(),
+            };
+            await updateActiveClaimedStream(id, proc, updates);
+          }
+        };
+
+        child.stdout?.on('data', (chunk) => {
+          progressBuffer += chunk.toString();
+          if (progressBuffer.length > 64 * 1024) progressBuffer = progressBuffer.slice(-16 * 1024);
+          const lines = progressBuffer.split(/\r?\n/);
+          progressBuffer = lines.pop() || '';
+          for (const line of lines) {
+            progressRecord.push(line);
+            if (line.startsWith('progress=')) {
+              const record = progressRecord.join('\n');
+              progressRecord = [];
+              void handleProgress(record).catch(() => {});
+            }
+          }
+        });
 
         child.stderr?.on('data', (chunk) => {
           const text = chunk.toString();
@@ -3909,8 +4166,32 @@ app.post('/api/streams/:id/start', async (req, res) => {
           console.log(`[Stream ${id}] Process exited with code ${code}, signal ${signal}`);
           const proc = activeWorkerProcesses.get(id);
           if (!proc || proc.claimToken !== claimToken || proc.child !== child) return;
+          if (progressWatchdogTimer) clearInterval(progressWatchdogTimer);
+          if (proc.stopRequestInProgress) return;
 
-          if (proc?.isIntentionalStop || (code === 0 && !signal)) {
+          if (attemptUsedDirectCopy && !copyFallbackAttempted && !confirmedLive && !proc.isIntentionalStop) {
+            copyFallbackAttempted = true;
+            streamForceTranscode = true;
+            proc.logs.push('[FFmpeg Mode] copy failed, falling back to transcode');
+            setTimeout(() => {
+              if (!proc.isIntentionalStop && activeWorkerProcesses.get(id) === proc) {
+                void spawnProcess().then((started) => {
+                  if (!started) {
+                    if (proc.isIntentionalStop || activeWorkerProcesses.get(id) !== proc) return;
+                    void updateActiveClaimedStream(id, proc, {
+                      status: 'ERROR',
+                      ffmpeg_pid: null,
+                      last_error: 'FFmpeg copy fallback could not be started safely.',
+                      updated_at: new Date().toISOString(),
+                    }, true);
+                  }
+                }).catch(() => {});
+              }
+            }, 0);
+            return;
+          }
+
+          if (proc?.isIntentionalStop) {
             // Clean exit or user-requested stop
             if (proc?.containerId) {
               clusterRegistry.releaseStreamJob(proc.containerId);
@@ -3921,6 +4202,8 @@ app.post('/api/streams/:id/start', async (req, res) => {
               ffmpeg_pid: null,
               updated_at: new Date().toISOString(),
             }, true)) {
+              await proc.cacheRelease?.();
+              proc.cacheRelease = undefined;
               activeWorkerProcesses.delete(id);
             }
           } else {
@@ -3941,18 +4224,21 @@ app.post('/api/streams/:id/start', async (req, res) => {
               });
               if (!stillOwnsStream) return;
 
-              proc.reconnectTimeout = setTimeout(() => {
-                if (!proc.isIntentionalStop && activeWorkerProcesses.get(id) === proc) {
-                  if (!spawnProcess()) {
-                    void updateActiveClaimedStream(id, proc, {
+              proc.reconnectTimeout = scheduleRestartAfterExit({
+                child,
+                delayMs: backoff,
+                shouldRestart: () => !proc.isIntentionalStop && activeWorkerProcesses.get(id) === proc,
+                restart: async () => {
+                  void spawnProcess().then((spawned) => {
+                    if (!spawned && !proc.isIntentionalStop && activeWorkerProcesses.get(id) === proc) return updateActiveClaimedStream(id, proc, {
                       status: 'ERROR',
                       ffmpeg_pid: null,
                       last_error: 'FFmpeg could not be restarted safely.',
                       updated_at: new Date().toISOString(),
                     }, true);
-                  }
-                }
-              }, backoff);
+                  }).catch(() => {});
+                },
+              }) || undefined;
             } else {
               // All 5 retries failed permanently
               console.error(`[Stream ${id}] All ${MAX_RESTART_RETRIES} restart retries permanently failed.`);
@@ -3965,11 +4251,27 @@ app.post('/api/streams/:id/start', async (req, res) => {
                 last_error: failureLog,
                 updated_at: new Date().toISOString(),
               }, true)) {
+                await proc.cacheRelease?.();
+                proc.cacheRelease = undefined;
                 activeWorkerProcesses.delete(id);
               }
             }
           }
         });
+
+        const progressWatchdogThresholdMs = Number(process.env.FFMPEG_PROGRESS_STALL_MS) || 30_000;
+        progressWatchdogTimer = setInterval(() => {
+          const proc = activeWorkerProcesses.get(id);
+          if (!proc || proc.claimToken !== claimToken || proc.child !== child
+            || proc.stopRequestInProgress || proc.isIntentionalStop
+            || Date.now() - lastOutputAdvanceAt < progressWatchdogThresholdMs) return;
+          proc.logs.push('[FFmpeg Watchdog] No advancing output progress; restarting FFmpeg.');
+          if (proc.logs.length > 100) proc.logs.shift();
+          clearInterval(progressWatchdogTimer!);
+          progressWatchdogTimer = null;
+          void terminateChildAndWait(child, 5000);
+        }, 5000);
+        progressWatchdogTimer.unref?.();
         return true;
       } catch (e: any) {
         console.warn(`[FFmpeg invocation notice]: ${sanitizeFfmpegDiagnostic(e?.message || e, { secrets: sensitiveStreamValues })}`);
@@ -3989,86 +4291,162 @@ app.post('/api/streams/:id/start', async (req, res) => {
       tier: userTier,
       routingMetadata: routing.routingMetadata,
       telemetry: {
-        bitrate_kbps: tierProfile.maxBitrateKbps,
-        fps: tierProfile.maxResolution.includes('60') ? 60.0 : 30.0,
-        dropped_frames: 0,
-        cpu_usage_pct: +(tierProfile.cpuCores * 0.35).toFixed(2),
-        mem_usage_mb: Math.round(tierProfile.memoryLimitMb * 0.4),
-        health_status: 'excellent',
-        speed: '1.00x',
+        bitrate_kbps: 0,
+        fps: 0,
+        dropped_frames: null,
+        cpu_usage_pct: null,
+        mem_usage_mb: null,
+        health_status: 'unknown',
+        speed: null,
+        video_mode: null,
         uptime_seconds: 0,
         destinations_count: finalDestinationsList.length,
         timestamp: new Date().toISOString(),
       },
+      cacheAbortController: new AbortController(),
+      cacheStatus: r2CacheSource ? 'pending' : 'not-applicable',
     };
     activeWorkerProcesses.set(id, activeProcess);
-    if (!spawnProcess() || !actualPid) {
+    let refreshDirectR2Input: (() => Promise<string>) | null = null;
+    if (r2CacheSource) {
+      const cacheDir = process.env.VIDEO_CACHE_DIR || path.join(DATA_DIR, 'video-cache');
+      const maxFileBytes = Number(process.env.VIDEO_CACHE_MAX_FILE_BYTES) || 5_000_000_000;
+      const minFreeBytes = Number(process.env.VIDEO_CACHE_MIN_FREE_BYTES) || 1024 * 1024 * 1024;
+      try { await cleanupOrphanedVideoCacheFiles(cacheDir, { lockProvider: localVideoCacheLockProvider }); } catch {}
+      const sourceVersionKnown = Boolean(r2CacheSource.etag || r2CacheSource.lastModified);
+      const cachePreparation = await retryCachePreparation({
+        attempts: sourceVersionKnown ? 2 : 0,
+        shouldAbort: () => activeProcess.cacheAbortController?.signal.aborted
+          || activeProcess.isIntentionalStop
+          || activeWorkerProcesses.get(id) !== activeProcess,
+        prepare: async () => {
+          const signedUrl = await r2CacheSource.provider.getSignedUrl(
+            r2CacheSource.objectKey,
+            7 * 24 * 60 * 60,
+          );
+          if (!signedUrl) throw new Error('Storage URL unavailable.');
+          let lastProgressAt = 0;
+          let lastProgressBytes = 0;
+          let lastProgressTime = Date.now();
+          return acquireVideoCache({
+            lockProvider: localVideoCacheLockProvider,
+            cacheDir,
+            identity: {
+              provider: 'r2',
+              bucket: r2CacheSource.provider.bucketName,
+              objectKey: r2CacheSource.objectKey,
+              etag: r2CacheSource.etag,
+              lastModified: r2CacheSource.lastModified,
+              expectedBytes: r2CacheSource.expectedBytes,
+            },
+            expectedBytes: r2CacheSource.expectedBytes,
+            maxFileBytes,
+            minFreeBytes,
+            signal: activeProcess.cacheAbortController?.signal,
+            verify: probeFfmpegVideoMetadata,
+            onProgress: (receivedBytes, totalBytes) => {
+              const now = Date.now();
+              if (now - lastProgressAt < 1000) return;
+              const elapsedSeconds = Math.max((now - lastProgressTime) / 1000, 0.001);
+              const downloadMbps = ((receivedBytes - lastProgressBytes) * 8) / elapsedSeconds / 1_000_000;
+              lastProgressAt = now;
+              lastProgressBytes = receivedBytes;
+              lastProgressTime = now;
+              activeProcess.cacheStatus = 'downloading';
+              activeProcess.telemetry = {
+                ...activeProcess.telemetry!,
+                cache_status: 'downloading',
+                cache_progress_pct: totalBytes ? Math.min(100, receivedBytes / totalBytes * 100) : null,
+                cache_bytes_downloaded: receivedBytes,
+                cache_total_bytes: totalBytes || r2CacheSource!.expectedBytes,
+                input_download_mbps: +downloadMbps.toFixed(2),
+                timestamp: new Date(now).toISOString(),
+              };
+              broadcastTelemetry(id, activeProcess.telemetry);
+            },
+            download: (destinationPath, { signal, onProgress }) => downloadVideoToLocalFile(
+              signedUrl,
+              destinationPath,
+              { expectedBytes: r2CacheSource!.expectedBytes, maxBytes: maxFileBytes, signal, onProgress },
+            ),
+          });
+        },
+      });
+      const cachedVideo = cachePreparation.value;
+
+      if (cachePreparation.cancelled || activeProcess.cacheAbortController?.signal.aborted || activeProcess.isIntentionalStop
+        || activeWorkerProcesses.get(id) !== activeProcess) {
+        await cachedVideo?.release();
+        return res.status(409).json({ success: false, error: 'Stream start was cancelled before FFmpeg could start.' });
+      }
+
+      if (cachedVideo) {
+        inputSource = cachedVideo.path;
+        activeProcess.cacheRelease = cachedVideo.release;
+        activeProcess.cacheStatus = cachedVideo.cacheHit ? 'hit' : 'ready';
+        const cacheStats = await getVideoCacheStats(cacheDir).catch(() => null);
+        activeProcess.telemetry = {
+          ...activeProcess.telemetry!,
+          cache_status: activeProcess.cacheStatus,
+          cache_progress_pct: 100,
+          cache_bytes_downloaded: cachedVideo.sizeBytes,
+          cache_total_bytes: cachedVideo.sizeBytes,
+          input_download_mbps: cachedVideo.cacheHit ? 0 : activeProcess.telemetry?.input_download_mbps ?? null,
+          cache_disk_total_bytes: cacheStats?.diskTotalBytes ?? null,
+          cache_disk_available_bytes: cacheStats?.diskAvailableBytes ?? null,
+          cache_disk_used_bytes: cacheStats ? cacheStats.diskTotalBytes - cacheStats.diskAvailableBytes : null,
+          cache_used_bytes: cacheStats?.cachedVideoBytes ?? null,
+          cache_video_count: cacheStats?.cachedVideoCount ?? null,
+          cached_video_width: cachedVideo.mediaMetadata?.width ?? null,
+          cached_video_height: cachedVideo.mediaMetadata?.height ?? null,
+          cached_video_codec: cachedVideo.mediaMetadata?.codecName ?? null,
+          timestamp: new Date().toISOString(),
+        };
+        broadcastTelemetry(id, activeProcess.telemetry);
+      } else {
+        const fallbackUrl = await r2CacheSource.provider.getSignedUrl(
+          r2CacheSource.objectKey,
+          7 * 24 * 60 * 60,
+        );
+        if (!fallbackUrl) throw new Error('R2 video is unavailable in local storage and could not be opened from R2.');
+        inputSource = fallbackUrl;
+        refreshDirectR2Input = () => r2CacheSource!.provider.getSignedUrl(r2CacheSource!.objectKey, 7 * 24 * 60 * 60);
+        activeProcess.cacheStatus = 'direct-r2-fallback';
+        activeProcess.telemetry = {
+          ...activeProcess.telemetry!,
+          cache_status: activeProcess.cacheStatus,
+          cache_progress_pct: null,
+          cache_fallback_reason: getCacheFallbackReason(sourceVersionKnown),
+          timestamp: new Date().toISOString(),
+        };
+        broadcastTelemetry(id, activeProcess.telemetry);
+      }
+    }
+
+    if (activeProcess.cacheAbortController?.signal.aborted || activeProcess.isIntentionalStop
+      || activeWorkerProcesses.get(id) !== activeProcess) {
+      await activeProcess.cacheRelease?.();
+      activeProcess.cacheRelease = undefined;
+      return res.status(409).json({ success: false, error: 'Stream start was cancelled before FFmpeg could start.' });
+    }
+
+    const spawned = await spawnProcess();
+    if (!spawned || !actualPid) {
+      if (activeProcess.cacheAbortController?.signal.aborted || activeProcess.isIntentionalStop
+        || activeWorkerProcesses.get(id) !== activeProcess) {
+        return res.status(409).json({ success: false, error: 'Stream start was cancelled before FFmpeg could start.' });
+      }
+      await activeProcess.cacheAbortController?.abort();
+      await terminateAndReleaseCache(activeProcess);
       stopProcessAfterOwnershipLoss(id, activeProcess, 'FFmpeg could not be started');
       throw new Error('FFmpeg could not be started safely.');
     }
 
-    // Set up continuous heartbeat and metrics loop (Feeding real-time telemetry)
-    let uptimeSeconds = 0;
-    const intervalId = setInterval(async () => {
-      uptimeSeconds += 2;
-      const proc = activeWorkerProcesses.get(id);
-      if (proc) {
-        const jitterFps = +(60 + (Math.random() * 0.4 - 0.2)).toFixed(1);
-        const jitterBitrate = Math.floor(6000 + (Math.random() * 200 - 100));
-        const droppedFrames = uptimeSeconds > 60 && Math.random() < 0.05 ? 1 : 0;
-        const cpuUsage = +(0.38 + (Math.random() * 0.06 - 0.03)).toFixed(2);
-        const memUsage = +(46.5 + (Math.random() * 1.5 - 0.75)).toFixed(1);
-
-        const telemetryData: StreamTelemetryData = {
-          bitrate_kbps: jitterBitrate,
-          fps: jitterFps,
-          dropped_frames: droppedFrames,
-          cpu_usage_pct: cpuUsage,
-          mem_usage_mb: memUsage,
-          health_status: droppedFrames > 5 ? 'warning' : 'excellent',
-          speed: '1.00x',
-          uptime_seconds: uptimeSeconds,
-          destinations_count: finalDestinationsList.length,
-          timestamp: new Date().toISOString(),
-        };
-
-        // Attach to in-memory process & broadcast to SSE subscribers
-        proc.telemetry = telemetryData;
-        broadcastTelemetry(id, telemetryData);
-
-        proc.logs.push(`[telemetry] uptime=${uptimeSeconds}s fps=${jitterFps} bitrate=${jitterBitrate}k dropped=${droppedFrames} dests=${finalDestinationsList.length} direct-copy OK`);
-        if (proc.logs.length > 100) proc.logs.shift();
-
-        // Update database / local store periodically
-        if (uptimeSeconds % 6 === 0) {
-          const updatePayload = {
-            status: 'live',
-            uptime_seconds: uptimeSeconds,
-            current_bitrate_kbps: jitterBitrate,
-            fps: jitterFps,
-            cpu_usage_pct: cpuUsage,
-            mem_usage_mb: memUsage,
-            ffmpeg_pid: actualPid,
-          };
-          await updateActiveClaimedStream(id, proc, {
-            ...updatePayload,
-            last_heartbeat: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          });
-        }
-      }
-    }, 2000);
-    activeProcess.intervalId = intervalId;
-
-    // Update database status with container and tier profile annotations
+    // FFmpeg remains in 'starting' until structured progress confirms output.
     const liveUpdate = {
-      status: 'live',
+      status: 'starting',
       ffmpeg_pid: actualPid,
       uptime_seconds: 0,
-      current_bitrate_kbps: tierProfile.maxBitrateKbps,
-      fps: tierProfile.maxResolution.includes('60') ? 60.0 : 30.0,
-      cpu_usage_pct: +(tierProfile.cpuCores * 0.35).toFixed(2),
-      mem_usage_mb: Math.round(tierProfile.memoryLimitMb * 0.4),
       last_started_at: new Date().toISOString(),
       cluster_id: tierProfile.clusterId,
       container_id: assignedContainer.id,
@@ -4093,6 +4471,14 @@ app.post('/api/streams/:id/start', async (req, res) => {
       multiCastCount: finalDestinationsList.length,
     });
   } catch (err: any) {
+    const active = activeWorkerProcesses.get(id);
+    if (active && active.claimToken === claimToken) {
+      active.isIntentionalStop = true;
+      active.cacheAbortController?.abort();
+      if (active.containerId) clusterRegistry.releaseStreamJob(active.containerId);
+      await terminateAndReleaseCache(active);
+      activeWorkerProcesses.delete(id);
+    }
     if (claimToken) {
       try {
         await updateClaimedStream(id, claimToken, {
@@ -4120,13 +4506,31 @@ app.get('/api/streams/:id/telemetry', (req, res) => {
 
   const isLive = stream.status === 'live' && Boolean(proc);
   const telemetryData: StreamTelemetryData = proc?.telemetry || {
-    bitrate_kbps: isLive ? (stream.current_bitrate_kbps || 6000) : 0,
-    fps: isLive ? (stream.fps || 60.0) : 0,
-    dropped_frames: 0,
-    cpu_usage_pct: isLive ? (stream.cpu_usage_pct || 0.38) : 0,
-    mem_usage_mb: isLive ? (stream.mem_usage_mb || 46.5) : 0,
-    health_status: isLive ? 'excellent' : 'warning',
-    speed: isLive ? '1.00x' : '0.00x',
+    bitrate_kbps: stream.current_bitrate_kbps || 0,
+    fps: stream.fps || 0,
+    dropped_frames: stream.dropped_frames ?? null,
+    cpu_usage_pct: stream.cpu_usage_pct ?? null,
+    mem_usage_mb: stream.mem_usage_mb ?? null,
+    health_status: stream.health_status || 'unknown',
+    speed: stream.speed ?? null,
+    output_time_seconds: stream.output_time_seconds ?? null,
+    playback_delay_seconds: stream.playback_delay_seconds ?? null,
+    video_mode: stream.video_mode ?? null,
+    cache_status: stream.cache_status ?? null,
+    cache_fallback_reason: stream.cache_fallback_reason ?? null,
+    cache_progress_pct: stream.cache_progress_pct ?? null,
+    cache_bytes_downloaded: stream.cache_bytes_downloaded ?? null,
+    cache_total_bytes: stream.cache_total_bytes ?? null,
+    input_download_mbps: stream.input_download_mbps ?? null,
+    cache_disk_total_bytes: stream.cache_disk_total_bytes ?? null,
+    cache_disk_available_bytes: stream.cache_disk_available_bytes ?? null,
+    cache_disk_used_bytes: stream.cache_disk_used_bytes ?? null,
+    cache_used_bytes: stream.cache_used_bytes ?? null,
+    cache_video_count: stream.cache_video_count ?? null,
+    cached_video_width: stream.cached_video_width ?? null,
+    cached_video_height: stream.cached_video_height ?? null,
+    cached_video_codec: stream.cached_video_codec ?? null,
+    reconnect_attempts: stream.reconnect_attempts ?? null,
     uptime_seconds: stream.uptime_seconds || 0,
     destinations_count: (stream.destinations?.length || 0) + 1,
     timestamp: new Date().toISOString(),
@@ -4151,13 +4555,31 @@ app.get('/api/streams/:id/telemetry/stream', (req, res) => {
   const stream = readLocalStreams().find((s) => s.id === id);
   const proc = activeWorkerProcesses.get(id);
   const initial = proc?.telemetry || {
-    bitrate_kbps: stream?.status === 'live' ? 6000 : 0,
-    fps: stream?.status === 'live' ? 60.0 : 0,
-    dropped_frames: 0,
-    cpu_usage_pct: stream?.status === 'live' ? 0.38 : 0,
-    mem_usage_mb: stream?.status === 'live' ? 46.5 : 0,
-    health_status: stream?.status === 'live' ? 'excellent' : 'warning',
-    speed: stream?.status === 'live' ? '1.00x' : '0.00x',
+    bitrate_kbps: stream?.current_bitrate_kbps || 0,
+    fps: stream?.fps || 0,
+    dropped_frames: stream?.dropped_frames ?? null,
+    cpu_usage_pct: stream?.cpu_usage_pct ?? null,
+    mem_usage_mb: stream?.mem_usage_mb ?? null,
+    health_status: stream?.health_status || 'unknown',
+    speed: stream?.speed ?? null,
+    output_time_seconds: stream?.output_time_seconds ?? null,
+    playback_delay_seconds: stream?.playback_delay_seconds ?? null,
+    video_mode: stream?.video_mode ?? null,
+    cache_status: stream?.cache_status ?? null,
+    cache_fallback_reason: stream?.cache_fallback_reason ?? null,
+    cache_progress_pct: stream?.cache_progress_pct ?? null,
+    cache_bytes_downloaded: stream?.cache_bytes_downloaded ?? null,
+    cache_total_bytes: stream?.cache_total_bytes ?? null,
+    input_download_mbps: stream?.input_download_mbps ?? null,
+    cache_disk_total_bytes: stream?.cache_disk_total_bytes ?? null,
+    cache_disk_available_bytes: stream?.cache_disk_available_bytes ?? null,
+    cache_disk_used_bytes: stream?.cache_disk_used_bytes ?? null,
+    cache_used_bytes: stream?.cache_used_bytes ?? null,
+    cache_video_count: stream?.cache_video_count ?? null,
+    cached_video_width: stream?.cached_video_width ?? null,
+    cached_video_height: stream?.cached_video_height ?? null,
+    cached_video_codec: stream?.cached_video_codec ?? null,
+    reconnect_attempts: stream?.reconnect_attempts ?? null,
     uptime_seconds: stream?.uptime_seconds || 0,
     destinations_count: (stream?.destinations?.length || 0) + 1,
     timestamp: new Date().toISOString(),
@@ -4186,9 +4608,30 @@ app.post('/api/streams/:id/stop', async (req, res) => {
     }
 
     active.isIntentionalStop = true;
+    active.stopRequestInProgress = true;
+    active.cacheAbortController?.abort();
     if (active.reconnectTimeout) clearTimeout(active.reconnectTimeout);
     if (active.intervalId) clearInterval(active.intervalId);
-    try { active.child?.kill('SIGTERM'); } catch {}
+    const childStopped = await terminateAndReleaseCache(active);
+    if (!childStopped) {
+      const keepAlive = setInterval(() => {
+        if (active.child?.exitCode != null || active.child?.signalCode != null) return;
+        const now = new Date().toISOString();
+        void updateActiveClaimedStream(id, active, { last_heartbeat: now, updated_at: now });
+      }, 5000);
+      keepAlive.unref?.();
+      active.intervalId = keepAlive;
+      const clearKeepAlive = () => {
+        clearInterval(keepAlive);
+        if (active.intervalId === keepAlive) active.intervalId = undefined;
+      };
+      active.child?.once('exit', clearKeepAlive);
+      active.child?.once('close', clearKeepAlive);
+      return res.status(503).json({
+        success: false,
+        error: 'FFmpeg exit could not be confirmed; stream ownership and cache protection were retained. Retry stop after the process exits.',
+      });
+    }
 
     const idleUpdate = {
       status: 'idle',
