@@ -39,7 +39,7 @@ export function resolveLocalUpload(videoUrl, uploadsDirectory) {
  * URLs and response bodies are deliberately excluded from errors/logs.
  * @param {string} sourceUrl
  * @param {string} destinationPath
- * @param {{ timeoutMs?: number, maxBytes?: number, expectedBytes?: number }} [options]
+ * @param {{ timeoutMs?: number, maxBytes?: number, expectedBytes?: number, signal?: AbortSignal, onProgress?: (receivedBytes: number, totalBytes: number | undefined) => void }} [options]
  * @returns {Promise<string>}
  */
 export async function downloadVideoToLocalFile(sourceUrl, destinationPath, {
@@ -47,6 +47,7 @@ export async function downloadVideoToLocalFile(sourceUrl, destinationPath, {
   maxBytes = 5 * 1024 * 1024 * 1024,
   expectedBytes,
   signal,
+  onProgress,
 } = {}) {
   let parsedUrl;
   try {
@@ -91,6 +92,7 @@ export async function downloadVideoToLocalFile(sourceUrl, destinationPath, {
           callback(new Error('The remote video exceeds the local cache size limit.'));
           return;
         }
+        try { onProgress?.(receivedBytes, Number.isFinite(contentLength) ? contentLength : expectedBytes); } catch {}
         callback(null, chunk);
       },
     });
@@ -98,7 +100,7 @@ export async function downloadVideoToLocalFile(sourceUrl, destinationPath, {
     await pipeline(
       Readable.fromWeb(response.body),
       byteLimit,
-      fs.createWriteStream(temporaryPath, { flags: 'wx' }),
+      fs.createWriteStream(temporaryPath, { flags: 'wx', mode: 0o600 }),
       { signal: controller.signal },
     );
 

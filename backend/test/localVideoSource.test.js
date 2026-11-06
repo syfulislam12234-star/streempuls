@@ -75,3 +75,66 @@ test('removes partial local cache files when a remote download fails', async (t)
   );
   assert.deepEqual(fs.readdirSync(directory), []);
 });
+
+test('rejects HTTP errors without leaving a cache file', async (t) => {
+  const server = createServer((_request, response) => {
+    response.writeHead(503, { 'content-length': 4 });
+    response.end('fail');
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => server.close());
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'streempuls-video-http-error-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const address = server.address();
+  await assert.rejects(
+    downloadVideoToLocalFile(`http://127.0.0.1:${address.port}/unavailable`, path.join(directory, 'source.input')),
+    /unsuccessful response/i,
+  );
+  assert.deepEqual(fs.readdirSync(directory), []);
+});
+
+test('rejects a completed response whose body is shorter than storage metadata', async (t) => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200);
+    response.end('partial');
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => server.close());
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'streempulse-video-incomplete-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const address = server.address();
+  await assert.rejects(
+    downloadVideoToLocalFile(`http://127.0.0.1:${address.port}/incomplete`, path.join(directory, 'source.input'), {
+      expectedBytes: 10,
+    }),
+    /empty or incomplete/i,
+  );
+  assert.deepEqual(fs.readdirSync(directory), []);
+});
+
+test('aborts timed-out downloads and removes partial files', async (t) => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-length': 20 });
+    response.write('partial');
+    setTimeout(() => response.end('response-is-late'), 200);
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => server.close());
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'streempulse-video-timeout-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const address = server.address();
+  await assert.rejects(
+    downloadVideoToLocalFile(`http://127.0.0.1:${address.port}/slow`, path.join(directory, 'source.input'), {
+      timeoutMs: 40,
+      expectedBytes: 20,
+    }),
+    /timed out/i,
+  );
+  assert.deepEqual(fs.readdirSync(directory), []);
+});

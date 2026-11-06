@@ -9,12 +9,10 @@ function redactUrls(text) {
     try {
       const url = new URL(rawUrl);
       if (url.protocol === 'rtmp:' || url.protocol === 'rtmps:') {
-        return `${url.protocol}//${url.host}/[REDACTED]${trailing}`;
+        return `[RTMP URL REDACTED]${trailing}`;
       }
       if (url.protocol === 'http:' || url.protocol === 'https:') {
-        url.search = '';
-        url.hash = '';
-        return `${url.origin}${url.pathname}${trailing}`;
+        return `[HTTP URL REDACTED]${trailing}`;
       }
       return `[URL REDACTED]${trailing}`;
     } catch {

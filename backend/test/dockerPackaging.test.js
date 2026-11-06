@@ -35,6 +35,11 @@ test('every tracked Docker deployment image receives the helpers it imports', ()
     'backend/streamDiagnostics.js',
     'backend/streamOwnership.js',
     'backend/localVideoSource.js',
+    'backend/videoCache.js',
+    'backend/ffmpegProgress.js',
+    'backend/workerShutdown.js',
+    'backend/ffmpegLifecycle.js',
+    'backend/cacheFallback.js',
   ]);
   assert.match(rootWorker, /COPY uploads\/sample_lofi_broadcast_1080p60\.mp4 \.\/uploads\/sample_lofi_broadcast_1080p60\.mp4/);
   assertCopied(backendApi, ['streamDestinations.js', 'streamAccess.js', 'streamPersistence.js', 'streamStart.js', 'redisLease.js']);
@@ -46,9 +51,20 @@ test('every tracked Docker deployment image receives the helpers it imports', ()
     'streamDiagnostics.js',
     'streamOwnership.js',
     'localVideoSource.js',
+    'videoCache.js',
+    'ffmpegProgress.js',
+    'workerShutdown.js',
+    'ffmpegLifecycle.js',
+    'cacheFallback.js',
   ]);
   assert.match(rootCompose, /UPLOADS_DIR=\/app\/uploads/);
   assert.match(backendCompose, /UPLOADS_DIR=\/app\/uploads/);
+  assert.match(rootCompose, /video-cache:\/app\/video-cache/);
+  assert.match(backendCompose, /video-cache:\/app\/video-cache/);
+  assert.match(rootCompose, /VIDEO_CACHE_DOWNLOAD_CONCURRENCY=2/);
+  assert.match(backendCompose, /VIDEO_CACHE_DOWNLOAD_CONCURRENCY=2/);
+  assert.match(rootCompose, /stop_grace_period:\s*30s/);
+  assert.match(backendCompose, /stop_grace_period:\s*30s/);
   assert.match(backendCompose, /\.\.\/uploads\/sample_lofi_broadcast_1080p60\.mp4:\/app\/uploads\/sample_lofi_broadcast_1080p60\.mp4:ro/);
   assert.match(rootDockerIgnore, /^\*\*\/\.env$/m);
   assert.match(rootDockerIgnore, /^\*\*\/\.env\.\*$/m);

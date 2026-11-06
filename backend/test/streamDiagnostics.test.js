@@ -17,8 +17,8 @@ test('child-process errors never expose raw spawn arguments, stream keys, or sig
 
   const safe = sanitizeChildProcessError(error, { secrets: [streamKey] });
   assert.match(safe, /ENOENT/);
-  assert.match(safe, /storage\.example\.test\/media\/video\.mp4/);
-  assert.doesNotMatch(safe, /youtube-live-secret-key|private-signature|secret-credential|spawnargs/);
+  assert.match(safe, /HTTP URL REDACTED/);
+  assert.doesNotMatch(safe, /storage\.example\.test|media\/video\.mp4|a\.example|youtube-live-secret-key|private-signature|secret-credential|spawnargs/);
 });
 
 test('FFmpeg diagnostics retain useful errors while redacting RTMP keys and signed URL queries', () => {
@@ -32,7 +32,9 @@ test('FFmpeg diagnostics retain useful errors while redacting RTMP keys and sign
   assert.equal(lines.length, 2);
   assert.match(lines[0], /HTTP error 403/);
   assert.match(lines[1], /Connection.*refused/);
-  assert.doesNotMatch(lines.join(' '), /never-log|rtmp-key-never-log|X-Amz-Signature/);
+  assert.match(lines.join(' '), /HTTP URL REDACTED/);
+  assert.match(lines.join(' '), /RTMP URL REDACTED/);
+  assert.doesNotMatch(lines.join(' '), /r2\.example\.test|ingest\.example|media\/clip\.mp4|never-log|rtmp-key-never-log|X-Amz-Signature/);
 });
 
 test('generic diagnostic sanitization strips signed query parameters and truncates output', () => {
@@ -41,7 +43,8 @@ test('generic diagnostic sanitization strips signed query parameters and truncat
     { maxLength: 100 },
   );
   assert.match(safe, /Error reading/);
-  assert.match(safe, /r2\.example\.test\/a\.mp4/);
+  assert.match(safe, /HTTP URL REDACTED/);
+  assert.doesNotMatch(safe, /r2\.example\.test|a\.mp4/);
   assert.doesNotMatch(safe, /very-secret|sig/);
   assert.ok(safe.length <= 100);
 });

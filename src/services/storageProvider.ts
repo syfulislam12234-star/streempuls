@@ -12,7 +12,7 @@
  * No modifications to streaming workers, FFmpeg pipelines, or core business logic required.
  */
 
-import { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl as getS3SignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
@@ -67,6 +67,8 @@ export interface IStorageProvider {
   getPublicUrl(fileName: string): string;
 
   getSignedUrl(fileName: string, expiresInSeconds?: number): Promise<string>;
+
+  headObject?(fileName: string): Promise<{ ContentLength?: number; ETag?: string; LastModified?: Date }>;
 
   getPresignedUploadUrl(
     fileName: string,
@@ -303,6 +305,23 @@ export class CloudflareR2StorageAdapter implements IStorageProvider {
     } catch (err: any) {
       console.warn(`[Cloudflare R2 Adapter] Presigned URL error for ${cleanPath}:`, err.message);
       return this.getPublicUrl(cleanPath);
+    }
+  }
+
+  async headObject(fileName: string): Promise<{ ContentLength?: number; ETag?: string; LastModified?: Date }> {
+    if (!this.s3Client) throw new Error('Cloudflare R2 is unavailable for cache metadata checks.');
+    try {
+      const result = await this.s3Client.send(new HeadObjectCommand({
+        Bucket: this.bucketName,
+        Key: fileName.replace(/^\/+/, ''),
+      }));
+      return {
+        ContentLength: result.ContentLength,
+        ETag: result.ETag,
+        LastModified: result.LastModified,
+      };
+    } catch {
+      throw new Error('Cloudflare R2 source metadata could not be verified.');
     }
   }
 

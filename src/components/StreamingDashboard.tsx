@@ -318,7 +318,7 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
             <span>Operational</span>
           </div>
           <div className="text-[11px] text-slate-400">
-            Direct Copy Streaming
+            Adaptive FFmpeg Output
           </div>
         </div>
       </div>
@@ -738,21 +738,21 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
                             <span>Live Health &amp; Telemetry</span>
                           </span>
                           <span className="text-[10px] font-mono text-emerald-400 font-bold px-1.5 py-0.2 bg-emerald-950 rounded">
-                            EXCELLENT
+                            {(stream.health_status || 'unknown').toUpperCase()}
                           </span>
                         </div>
                         <div className="grid grid-cols-3 gap-1 text-[11px] font-mono text-slate-300">
                           <div>
                             <span className="text-[10px] text-slate-400 block font-sans">Bitrate</span>
-                            <span className="font-bold">{stream.current_bitrate_kbps ? `${stream.current_bitrate_kbps}k` : '6,000k'}</span>
+                            <span className="font-bold">{stream.current_bitrate_kbps ? `${stream.current_bitrate_kbps}k` : '—'}</span>
                           </div>
                           <div>
                             <span className="text-[10px] text-slate-400 block font-sans">FPS</span>
-                            <span className="font-bold">{stream.fps ? stream.fps : '60.0'}</span>
+                            <span className="font-bold">{stream.fps ? stream.fps : '—'}</span>
                           </div>
                           <div>
                             <span className="text-[10px] text-slate-400 block font-sans">Dropped</span>
-                            <span className="text-emerald-400 font-bold">0</span>
+                            <span className="text-emerald-400 font-bold">{stream.dropped_frames ?? '—'}</span>
                           </div>
                         </div>
                         <button
