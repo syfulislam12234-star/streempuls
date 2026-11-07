@@ -385,7 +385,9 @@ app.post('/api/storage/presigned-upload', async (req, res, next) => {
     if (typeof contentType !== 'string' || !/^(video|image)\/[a-z0-9.+-]+$/i.test(contentType)) {
       return res.status(400).json({ success: false, error: 'A valid video or image Content-Type is required.' });
     }
-    const uploadContentType = contentType.trim();
+    // Preserve the caller's exact MIME string: it is included in the signature
+    // and must match the Content-Type sent by the browser on the PUT.
+    const uploadContentType = contentType;
     if (fileSizeMb != null && (!Number.isFinite(Number(fileSizeMb)) || Number(fileSizeMb) <= 0 || Number(fileSizeMb) > 5000)) {
       return res.status(400).json({ success: false, error: 'fileSizeMb must be greater than 0 and no more than 5000 MB for a single PUT.' });
     }

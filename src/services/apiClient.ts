@@ -542,6 +542,9 @@ export const apiClient = {
       throw new Error('The storage API did not return a direct HTTPS Cloudflare R2 upload URL.');
     }
 
+    // Validate the backend's signed value, but never forward its header map:
+    // only Content-Type is required for this R2 PUT; auth/custom API headers
+    // must not be sent to the bucket.
     const signedContentType = Object.entries(presigned.headers || {})
       .find(([name]) => name.toLowerCase() === 'content-type')?.[1];
     if (!signedContentType || signedContentType !== contentType) {
@@ -555,8 +558,9 @@ export const apiClient = {
       xhr.open('PUT', uploadUrl.toString());
       xhr.withCredentials = false;
 
-      // This value is part of the signature; send it verbatim and no extra headers.
-      xhr.setRequestHeader('Content-Type', signedContentType);
+      // Match the exact file.type used to create the signature; add no other
+      // application headers to the cross-origin bucket request.
+      xhr.setRequestHeader('Content-Type', contentType);
 
       if (onProgress && xhr.upload) {
         xhr.upload.onprogress = (event) => {
