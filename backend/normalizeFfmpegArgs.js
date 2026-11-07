@@ -12,13 +12,14 @@ export function getStreamCopyOutputDetails(sourceReference) {
   } catch {}
 
   if (path.extname(sourcePath).toLowerCase() === '.mkv') {
-    return { extension: '.mkv', contentType: 'video/x-matroska' };
+    return { extension: '.mkv', contentType: 'video/x-matroska', format: 'matroska' };
   }
-  return { extension: '.mp4', contentType: 'video/mp4' };
+  return { extension: '.mp4', contentType: 'video/mp4', format: 'mp4' };
 }
 
 /** Build a remux-only FFmpeg command: no filters and no audio/video encoders. */
-export function buildNormalizeFfmpegArgs(inputPath, outputPath) {
+export function buildNormalizeFfmpegArgs(inputPath, outputPath, { format } = {}) {
+  const outputFormat = format || (path.extname(outputPath).toLowerCase() === '.mkv' ? 'matroska' : 'mp4');
   const args = [
     '-y',
     '-i', inputPath,
@@ -29,10 +30,11 @@ export function buildNormalizeFfmpegArgs(inputPath, outputPath) {
     '-c', 'copy',
   ];
 
-  if (path.extname(outputPath).toLowerCase() === '.mp4') {
-    args.push('-movflags', '+faststart');
+  if (outputFormat === 'mp4') {
+    args.push('-movflags', outputPath === 'pipe:1' ? 'frag_keyframe+empty_moov+default_base_moof' : '+faststart');
   }
 
+  args.push('-f', outputFormat);
   args.push(outputPath);
   return args;
 }

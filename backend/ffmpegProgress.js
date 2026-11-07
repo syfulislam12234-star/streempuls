@@ -144,6 +144,20 @@ export function directCopyIneligibility(metadata) {
 }
 
 /**
+ * Uploaded files already encoded for direct RTMP stream-copy can be used as-is.
+ * Require bounded H.264 video plus AAC audio so incompatible sources still go
+ * through the remux preparation path instead of being marked ready blindly.
+ */
+export function directStreamCopyIneligibility(metadata) {
+  const videoReason = directCopyIneligibility(metadata);
+  if (videoReason) return videoReason;
+  if (metadata.audioCodec !== 'aac') return 'audio-codec-not-aac';
+  if (![1, 2].includes(metadata.audioChannels)) return 'audio-channel-count-unsupported';
+  if (![44100, 48000].includes(metadata.audioSampleRate)) return 'audio-sample-rate-unsupported';
+  return null;
+}
+
+/**
  * Strict live-stream direct-copy profile. A video may only go live with
  * stream-copy (-c copy) when it has already been normalized at upload time to
  * this exact profile. Nothing is transcoded live.

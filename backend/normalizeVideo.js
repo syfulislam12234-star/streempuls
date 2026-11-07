@@ -20,8 +20,16 @@ import { getStorageProvider } from './storage.js';
 import { getR2Configuration } from './r2Config.js';
 import { downloadVideoToLocalFile } from './localVideoSource.js';
 import { supabase, SUPABASE_ADMIN_CONFIGURED } from './supabase.js';
-import { PutObjectCommand } from '@aws-sdk/client-s3';
+import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
+  DeleteObjectCommand,
+  PutObjectCommand,
+  UploadPartCommand,
+} from '@aws-sdk/client-s3';
 import { buildNormalizeFfmpegArgs, getStreamCopyOutputDetails } from './normalizeFfmpegArgs.js';
+import { directStreamCopyIneligibility, probeFfmpegVideoMetadata } from './ffmpegProgress.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const DATA_DIR = process.env.DATA_DIR || path.resolve(__dirname, '..', 'data');
@@ -58,6 +66,7 @@ const NORMALIZE_SLOT_RENEW_MS = Math.max(5000, Number(process.env.NORMALIZE_SLOT
 const NORMALIZE_NICE_LEVEL = Number(process.env.NORMALIZE_NICE_LEVEL || '15');
 const NORMALIZE_QUEUE_NAME = process.env.NORMALIZE_QUEUE_NAME || 'normalization-queue';
 const NORMALIZED_OBJECT_PREFIX = 'normalized/';
+const R2_REMUX_PART_SIZE = 8 * 1024 * 1024;
 
 const slotOwnerToken = `${process.env.WORKER_NODE_ID || 'normalize-worker'}:${process.pid}:${randomUUID()}`;
 
@@ -131,6 +140,112 @@ function spawnNormalizeFfmpeg(args) {
     });
   }
   return spawnAndWait('ffmpeg', args, { label: 'ffmpeg-normalize' });
+}
+
+function spawnFfmpegWithStdout(args) {
+  const command = process.platform === 'linux' ? 'nice' : 'ffmpeg';
+  const commandArgs = process.platform === 'linux'
+    ? ['-n', String(Math.max(-20, Math.min(19, NORMALIZE_NICE_LEVEL))), 'ffmpeg', ...args]
+    : args;
+  return spawn(command, commandArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+function sanitizeFfmpegOutput(value) {
+  return String(value || '')
+    .replace(/https?:\/\/[^\s'"<>]+/gi, '[remote source]')
+    .slice(-1500)
+    .replace(/\r?\n/g, ' | ');
+}
+
+/**
+ * Remux a remote source directly into an R2 multipart upload. FFmpeg reads the
+ * signed source URL and writes a non-seekable fragmented container to stdout;
+ * bounded 8 MiB parts provide backpressure without an intermediate file.
+ */
+async function remuxRemoteSourceToR2({ client, bucket, sourceUrl, objectKey, contentType, format }) {
+  const created = await client.send(new CreateMultipartUploadCommand({
+    Bucket: bucket,
+    Key: objectKey,
+    ContentType: contentType,
+  }));
+  if (!created.UploadId) throw new Error('R2 did not return a remux multipart upload ID.');
+
+  let child;
+  let processResult;
+  const parts = [];
+  let stderrTail = '';
+  let totalBytes = 0;
+  let currentSize = 0;
+  let currentChunks = [];
+  let nextPartNumber = 1;
+
+  const uploadPart = async () => {
+    if (currentSize === 0) return;
+    const body = currentChunks.length === 1 ? currentChunks[0] : Buffer.concat(currentChunks, currentSize);
+    const uploaded = await client.send(new UploadPartCommand({
+      Bucket: bucket,
+      Key: objectKey,
+      UploadId: created.UploadId,
+      PartNumber: nextPartNumber,
+      Body: body,
+      ContentLength: body.length,
+    }));
+    if (!uploaded.ETag) throw new Error(`R2 did not return an ETag for remux part ${nextPartNumber}.`);
+    parts.push({ PartNumber: nextPartNumber, ETag: uploaded.ETag });
+    nextPartNumber += 1;
+    currentSize = 0;
+    currentChunks = [];
+  };
+
+  try {
+    const ffmpegArgs = buildNormalizeFfmpegArgs(sourceUrl, 'pipe:1', { format });
+    child = spawnFfmpegWithStdout(ffmpegArgs);
+    child.stderr?.on('data', (chunk) => {
+      stderrTail = `${stderrTail}${chunk.toString()}`.slice(-8192);
+    });
+    processResult = new Promise((resolve, reject) => {
+      child.once('error', () => reject(new Error('The streaming FFmpeg remux process could not start.')));
+      child.once('close', (code, signal) => {
+        if (code === 0) resolve();
+        else reject(new Error(`Streaming FFmpeg remux failed (code ${code}, signal ${signal || 'none'}): ${sanitizeFfmpegOutput(stderrTail)}`));
+      });
+    });
+    processResult.catch(() => {});
+
+    for await (const chunkValue of child.stdout) {
+      const chunk = Buffer.isBuffer(chunkValue) ? chunkValue : Buffer.from(chunkValue);
+      let offset = 0;
+      while (offset < chunk.length) {
+        const copyLength = Math.min(R2_REMUX_PART_SIZE - currentSize, chunk.length - offset);
+        const slice = chunk.subarray(offset, offset + copyLength);
+        currentChunks.push(slice);
+        currentSize += slice.length;
+        totalBytes += slice.length;
+        offset += copyLength;
+        if (currentSize === R2_REMUX_PART_SIZE) await uploadPart();
+      }
+    }
+    await processResult;
+    await uploadPart();
+    if (totalBytes === 0 || parts.length === 0) throw new Error('FFmpeg produced an empty remux output.');
+
+    await client.send(new CompleteMultipartUploadCommand({
+      Bucket: bucket,
+      Key: objectKey,
+      UploadId: created.UploadId,
+      MultipartUpload: { Parts: parts },
+    }));
+    return { key: objectKey, sizeBytes: totalBytes };
+  } catch (error) {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    await processResult?.catch(() => {});
+    await client.send(new AbortMultipartUploadCommand({
+      Bucket: bucket,
+      Key: objectKey,
+      UploadId: created.UploadId,
+    })).catch(() => {});
+    throw error;
+  }
 }
 
 /**
@@ -258,6 +373,8 @@ async function markAssetStatus({ assetKey, sourceUrl, status, normalizedObjectKe
   }
 
   return asset;
+}
+
 /**
  * Normalize one video. Intended to be processed by normalizeWorker.js.
  * @param {Object} jobData
@@ -292,41 +409,106 @@ export async function normalizeVideoJob(jobData) {
 
     await markAssetStatus({ assetKey, sourceUrl, status: 'processing', streamId });
 
-    // Resolve a downloadable URL for the source.
+    // Resolve a private signed URL without downloading the object. ffprobe can
+    // inspect the remote container through HTTP range requests.
     let downloadUrl = sourceUrl;
-    if (!downloadUrl && objectKey) {
-      const r2Provider = getStorageProvider('r2');
-      if (r2Provider && typeof r2Provider.getSignedUrl === 'function') {
-        downloadUrl = await r2Provider.getSignedUrl(objectKey, 3600);
+    let r2Provider = null;
+    if (objectKey) {
+      try {
+        r2Provider = getStorageProvider('r2');
+        await r2Provider.ensureInitialized?.();
+        if (typeof r2Provider.getSignedUrl === 'function') {
+          downloadUrl = await r2Provider.getSignedUrl(objectKey, 3600);
+        }
+      } catch {
+        // The source may belong to the configured non-R2 adapter; keep its URL.
       }
     }
     if (!downloadUrl) {
       throw new Error('No downloadable source URL available for normalization.');
     }
 
-    sourcePath = path.join(TEMP_DIR, `streempulse-normalize-source-${randomUUID()}.mp4`);
+    // Reuse already-live-compatible H.264/AAC objects in place. The metadata
+    // probe uses range reads; it never downloads the full hour-long source.
+    let sourceMetadata = null;
+    if (objectKey) {
+      try {
+        sourceMetadata = await probeFfmpegVideoMetadata(downloadUrl, { timeoutMs: 30_000 });
+      } catch {
+        // A probe miss is not fatal: proceed with a streaming FFmpeg remux.
+        console.warn(`[Normalize] Remote metadata probe unavailable; using streaming remux for ${sourceDisplay}`);
+      }
+      if (sourceMetadata) {
+        const ineligibility = directStreamCopyIneligibility(sourceMetadata);
+        if (!ineligibility) {
+          await markAssetStatus({
+            assetKey,
+            sourceUrl,
+            status: 'ready',
+            normalizedObjectKey: objectKey,
+            streamId,
+          });
+          console.log(`[Normalize] Source is already stream-copy ready: ${sourceDisplay}`);
+          return { normalizedObjectKey: objectKey, reusedSource: true };
+        }
+        throw new Error(`Video is not compatible with direct H.264/AAC stream copy (${ineligibility}). Re-upload a compatible source; no re-encoding is performed.`);
+      }
+    }
+
+    const outputDetails = getStreamCopyOutputDetails(objectKey || downloadUrl);
+    if (r2Provider?.s3Client) {
+      const { bucket } = getR2Configuration();
+      const remuxObjectKey = `${NORMALIZED_OBJECT_PREFIX}${Date.now()}-${randomUUID()}-remuxed${outputDetails.extension}`;
+      const uploaded = await remuxRemoteSourceToR2({
+        client: r2Provider.s3Client,
+        bucket,
+        sourceUrl: downloadUrl,
+        objectKey: remuxObjectKey,
+        contentType: outputDetails.contentType,
+        format: outputDetails.format,
+      });
+      let remuxMetadata;
+      try {
+        const remuxUrl = await r2Provider.getSignedUrl(uploaded.key, 600);
+        remuxMetadata = await probeFfmpegVideoMetadata(remuxUrl, { timeoutMs: 30_000 });
+      } catch {
+        await r2Provider.s3Client.send(new DeleteObjectCommand({ Bucket: bucket, Key: uploaded.key })).catch(() => {});
+        throw new Error('The remuxed video could not be verified for direct H.264/AAC streaming.');
+      }
+      const remuxIneligibility = directStreamCopyIneligibility(remuxMetadata);
+      if (remuxIneligibility) {
+        await r2Provider.s3Client.send(new DeleteObjectCommand({ Bucket: bucket, Key: uploaded.key })).catch(() => {});
+        throw new Error(`The remuxed video is not compatible with direct H.264/AAC stream copy (${remuxIneligibility}). Re-upload a compatible source; no re-encoding is performed.`);
+      }
+      await markAssetStatus({
+        assetKey, sourceUrl, status: 'ready', normalizedObjectKey: uploaded.key, sizeBytes: uploaded.sizeBytes, streamId,
+      });
+      console.log(`[Normalize] Streaming remux ready: ${sourceDisplay} -> ${uploaded.key} (${uploaded.sizeBytes} bytes)`);
+      return { normalizedObjectKey: uploaded.key, sizeBytes: uploaded.sizeBytes, streamed: true };
+    }
+
+    // Non-R2 adapters keep the existing local-file path. R2 remuxes above
+    // stream directly from the signed source into multipart upload parts.
+    sourcePath = path.join(TEMP_DIR, `streempulse-normalize-source-${randomUUID()}${outputDetails.extension}`);
     await downloadVideoToLocalFile(downloadUrl, sourcePath, {
       expectedBytes: undefined,
       maxBytes: Number(process.env.VIDEO_CACHE_MAX_FILE_BYTES) || 5_000_000_000,
     });
-
     const sourceStat = await fsp.stat(sourcePath);
-    if (!sourceStat.size || sourceStat.size === 0) {
-      throw new Error('Downloaded source video is empty.');
-    }
+    if (!sourceStat.size) throw new Error('Downloaded source video is empty.');
 
-    const outputDetails = getStreamCopyOutputDetails(objectKey || downloadUrl);
     outputPath = path.join(TEMP_DIR, `streempulse-remuxed-${randomUUID()}${outputDetails.extension}`);
-    const ffmpegArgs = buildNormalizeFfmpegArgs(sourcePath, outputPath);
-    await spawnNormalizeFfmpeg(ffmpegArgs);
-
+    await spawnNormalizeFfmpeg(buildNormalizeFfmpegArgs(sourcePath, outputPath, { format: outputDetails.format }));
     const outStat = await fsp.stat(outputPath);
-    if (!outStat.size || outStat.size === 0) {
-      throw new Error('Normalization produced an empty output file.');
+    if (!outStat.size) throw new Error('FFmpeg produced an empty remux output.');
+    const remuxMetadata = await probeFfmpegVideoMetadata(outputPath);
+    const remuxIneligibility = directStreamCopyIneligibility(remuxMetadata);
+    if (remuxIneligibility) {
+      throw new Error(`The remuxed video is not compatible with direct H.264/AAC stream copy (${remuxIneligibility}). Re-upload a compatible source; no re-encoding is performed.`);
     }
 
-    const normalizedObjectKey = `${NORMALIZED_OBJECT_PREFIX}${Date.now()}-${randomUUID()}-${path.basename(outputPath)}`;
-    const uploaded = await uploadNormalizedFile(normalizedObjectKey, outputPath, outputDetails.contentType);
+    const localOutputKey = `${NORMALIZED_OBJECT_PREFIX}${Date.now()}-${randomUUID()}-${path.basename(outputPath)}`;
+    const uploaded = await uploadNormalizedFile(localOutputKey, outputPath, outputDetails.contentType);
 
     await markAssetStatus({
       assetKey, sourceUrl, status: 'ready', normalizedObjectKey: uploaded.key, sizeBytes: uploaded.sizeBytes, streamId,

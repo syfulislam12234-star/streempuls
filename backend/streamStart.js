@@ -2,6 +2,7 @@ import { withRedisLease } from './redisLease.js';
 import { reconcileUserStreamsForStart } from './streamOwnership.js';
 import { countActiveStreams } from './streamQuota.js';
 import { getSignedStorageUrl } from './supabase.js';
+import { getStorageProvider } from './storage.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -140,7 +141,13 @@ if (stream && stream.status === 'starting') {
         try {
           // Stream exclusively from the normalized object; keep the existing
           // R2/Supabase -> local cache -> FFmpeg input flow in the worker.
-          startVideoUrl = await getSignedStorageUrl(asset.normalized_object_key, 3600);
+          if (String(asset.storageProvider || '').toLowerCase().includes('cloudflare r2')) {
+            const r2Provider = getStorageProvider('r2');
+            await r2Provider.ensureInitialized?.();
+            startVideoUrl = await r2Provider.getSignedUrl(asset.normalized_object_key, 3600);
+          } else {
+            startVideoUrl = await getSignedStorageUrl(asset.normalized_object_key, 3600);
+          }
         } catch {
           // If signing fails, keep the original URL; the worker's pre-flight
           // probe will still refuse any input that is not normalized.
