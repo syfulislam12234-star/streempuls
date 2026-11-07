@@ -56,28 +56,3 @@ export const streamQueue = new Queue(QUEUE_NAME, {
 });
 
 console.log(`[BullMQ] Initialized Queue: "${QUEUE_NAME}"`);
-
-// BullMQ Queue for upload-time video normalization (heavy transcoding, once).
-// Runs in a dedicated worker with a Redis slot lock (max 1-2 concurrent jobs)
-// and `nice` so it cannot starve live streams, the API, or Redis.
-export const NORMALIZE_QUEUE_NAME = process.env.NORMALIZE_QUEUE_NAME || 'normalization-queue';
-
-export const normalizeQueue = new Queue(NORMALIZE_QUEUE_NAME, {
-  connection: redisConfig,
-  defaultJobOptions: {
-    attempts: 3, // 1 initial + up to 2 retries
-    backoff: {
-      type: 'exponential',
-      delay: 30000,
-    },
-    removeOnComplete: {
-      count: 50,
-      age: 24 * 3600,
-    },
-    removeOnFail: {
-      count: 100,
-    },
-  },
-});
-
-console.log(`[BullMQ] Initialized Queue: "${NORMALIZE_QUEUE_NAME}"`);

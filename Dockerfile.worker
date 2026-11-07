@@ -22,8 +22,7 @@ RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 # Copy worker application source files
 COPY backend/worker.js backend/queue.js backend/supabase.js backend/storage.js backend/healthcheck-worker.js backend/r2ObjectUrl.js backend/streamDestinations.js backend/redisLease.js backend/streamLeaseRunner.js backend/streamDiagnostics.js backend/streamOwnership.js backend/localVideoSource.js ./
-COPY backend/videoCache.js backend/ffmpegProgress.js backend/workerShutdown.js backend/ffmpegLifecycle.js backend/cacheFallback.js backend/normalizeVideo.js backend/normalizeWorker.js ./
-COPY backend/scripts/backfillNormalization.js ./
+COPY backend/videoCache.js backend/ffmpegProgress.js backend/workerShutdown.js backend/ffmpegLifecycle.js backend/cacheFallback.js ./
 COPY uploads/sample_lofi_broadcast_1080p60.mp4 ./uploads/sample_lofi_broadcast_1080p60.mp4
 
 # Set environment

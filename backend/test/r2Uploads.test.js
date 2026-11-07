@@ -307,6 +307,9 @@ test('direct R2 upload, confirmation, private preview, and per-user asset isolat
   const confirmation = await confirmResponse.json();
   assert.equal(confirmation.asset.sizeBytes, videoBytes.length, 'size must come from R2, not the client');
   assert.equal(confirmation.asset.contentType, 'video/mp4');
+  assert.equal(confirmation.asset.normalization_status, 'ready');
+  assert.equal(confirmation.asset.normalized, true);
+  assert.equal(confirmation.asset.normalized_object_key, presign.key);
   assert.equal(confirmation.asset.fileSizeMb, +(videoBytes.length / (1024 * 1024)).toFixed(1));
   assert.equal(confirmation.asset.resolution, 'Not analyzed');
   assert.equal(confirmation.asset.url, presign.publicUrl, 'the durable stream source stays separate from the expiring preview URL');
@@ -428,20 +431,21 @@ test('direct R2 upload, confirmation, private preview, and per-user asset isolat
   const multipartConfirmation = await multipartConfirmResponse.json();
   assert.equal(multipartConfirmation.asset.sizeBytes, multipartBytes.length);
   assert.equal(multipartConfirmation.asset.contentType, 'video/mp4');
+  assert.equal(multipartConfirmation.asset.normalization_status, 'ready');
+  assert.equal(multipartConfirmation.asset.normalized, true);
+  assert.equal(multipartConfirmation.asset.normalized_object_key, multipart.key);
 
-  const pendingStreamResponse = await postJson(baseUrl, '/api/streams', {
-    title: 'Normalization gate test',
+  const readyStreamResponse = await postJson(baseUrl, '/api/streams', {
+    title: 'Immediate upload readiness test',
     videoUrl: multipartConfirmation.asset.url,
     streamKey: 'normalization-test-key',
     rtmpServerUrl: 'rtmp://a.rtmp.youtube.com/live2',
   }, ownerToken);
-  assert.equal(pendingStreamResponse.status, 201);
-  const pendingStream = (await pendingStreamResponse.json()).stream;
-  const blockedStartResponse = await postJson(baseUrl, `/api/streams/${pendingStream.id}/start`, {}, ownerToken);
-  assert.equal(blockedStartResponse.status, 409);
-  const blockedStart = await blockedStartResponse.json();
-  assert.equal(blockedStart.code, 'VIDEO_NORMALIZATION_PENDING');
-  assert.match(blockedStart.error, /cannot go live until completed/i);
+  assert.equal(readyStreamResponse.status, 201);
+  const readyStream = (await readyStreamResponse.json()).stream;
+  assert.equal(readyStream.normalization_status, 'ready');
+  assert.equal(readyStream.normalized, true);
+  assert.equal(readyStream.normalized_object_key, multipart.key);
 
   const abortInitResponse = await postJson(baseUrl, '/api/storage/multipart/initiate', {
     fileName: 'cancelled-video.mp4',

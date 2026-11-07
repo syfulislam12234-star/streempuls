@@ -9,10 +9,7 @@
     "dev": "node --watch server.js",
     "test": "node --test",
     "worker": "node worker.js",
-    "worker:dev": "node --watch worker.js",
-    "normalize-worker": "node normalizeWorker.js",
-    "normalize-worker:dev": "node --watch normalizeWorker.js",
-    "backfill:normalization": "node scripts/backfillNormalization.js"
+    "worker:dev": "node --watch worker.js"
   },
   "keywords": [
     "youtube-streaming",
