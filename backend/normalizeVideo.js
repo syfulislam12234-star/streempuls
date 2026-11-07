@@ -1,16 +1,13 @@
 /**
- * Upload-time video normalization (heavy transcoding, once per video).
+ * Upload-time video preparation using stream-copy remuxing (no re-encoding).
  *
- * Normalizes an uploaded video to the strict live-stream direct-copy profile:
- *   ffmpeg -i input -vf "scale=1080:1920:force_original_aspect_ratio=decrease,
- *   pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,fps=30" -c:v libx264
- *   -preset medium -profile:v high -pix_fmt yuv420p -b:v 4500k -maxrate 5000k
- *   -bufsize 9000k -g 60 -keyint_min 60 -sc_threshold 0 -c:a aac -b:a 128k
- *   -ar 44100 -ac 2 -movflags +faststart output.mp4
+ * Remuxes supported streams into MP4 or Matroska with `-c copy`; codecs,
+ * resolution and frame rate are not changed. MP4/MOV sources are written as
+ * MP4, while MKV sources remain Matroska. Incompatible MP4 streams fail rather
+ * than falling back to CPU-heavy transcoding.
  *
- * Concurrency is limited by a Redis slot lock (max 1-2 jobs at a time). The
- * FFmpeg process is spawned under `nice` (lowest niceness on Linux) so
- * normalization can never starve live streams, the API, Redis or Coolify.
+ * The complete source is still downloaded and uploaded, so elapsed time is
+ * bounded by file size and network throughput even though FFmpeg does no encode.
  */
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -24,6 +21,7 @@ import { getR2Configuration } from './r2Config.js';
 import { downloadVideoToLocalFile } from './localVideoSource.js';
 import { supabase, SUPABASE_ADMIN_CONFIGURED } from './supabase.js';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
+import { buildNormalizeFfmpegArgs, getStreamCopyOutputDetails } from './normalizeFfmpegArgs.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const DATA_DIR = process.env.DATA_DIR || path.resolve(__dirname, '..', 'data');
@@ -122,36 +120,7 @@ async function spawnAndWait(command, args, { label = 'process' } = {}) {
 }
 
 /**
- * Build the upload-time normalization FFmpeg argument vector.
- * Heavy transcoding happens here, once, never live.
- */
-function buildNormalizeFfmpegArgs(inputPath, outputPath) {
-  return [
-    '-y',
-    '-i', inputPath,
-    '-vf',
-    'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,fps=30',
-    '-c:v', 'libx264',
-    '-preset', 'medium',
-    '-profile:v', 'high',
-    '-pix_fmt', 'yuv420p',
-    '-b:v', '4500k',
-    '-maxrate', '5000k',
-    '-bufsize', '9000k',
-    '-g', '60',
-    '-keyint_min', '60',
-    '-sc_threshold', '0',
-    '-c:a', 'aac',
-    '-b:a', '128k',
-    '-ar', '44100',
-    '-ac', '2',
-    '-movflags', '+faststart',
-    outputPath,
-  ];
-}
-
-/**
- * Spawn FFmpeg under `nice` on Linux so normalization is deprioritized against
+ * Spawn FFmpeg under `nice` on Linux so remuxing is deprioritized against
  * live streams, the API and Redis. On non-Linux (e.g. local dev) FFmpeg is
  * spawned directly because `nice` is unavailable.
  */
@@ -170,7 +139,7 @@ function spawnNormalizeFfmpeg(args) {
  * buffered in memory. Supabase Storage falls back to the buffer-based adapter
  * upload.
  */
-async function uploadNormalizedFile(objectKey, filePath) {
+async function uploadNormalizedFile(objectKey, filePath, contentType) {
   const stat = await fsp.stat(filePath);
   const provider = getStorageProvider('r2');
   if (provider?.s3Client) {
@@ -180,7 +149,7 @@ async function uploadNormalizedFile(objectKey, filePath) {
       Bucket: bucket,
       Key: objectKey,
       Body: stream,
-      ContentType: 'video/mp4',
+      ContentType: contentType,
       ContentLength: stat.size,
     }));
     return {
@@ -195,7 +164,7 @@ async function uploadNormalizedFile(objectKey, filePath) {
     throw new Error(`Normalized file (${stat.size} bytes) is too large for the buffer-based storage adapter. Configure Cloudflare R2 for large videos.`);
   }
   const buffer = await fsp.readFile(filePath);
-  const result = await getStorageProvider().upload(objectKey, buffer, 'video/mp4');
+  const result = await getStorageProvider().upload(objectKey, buffer, contentType);
   return {
     key: result.key || objectKey,
     sizeBytes: stat.size,
@@ -346,7 +315,8 @@ export async function normalizeVideoJob(jobData) {
       throw new Error('Downloaded source video is empty.');
     }
 
-    outputPath = path.join(TEMP_DIR, `streempulse-normalized-${randomUUID()}.mp4`);
+    const outputDetails = getStreamCopyOutputDetails(objectKey || downloadUrl);
+    outputPath = path.join(TEMP_DIR, `streempulse-remuxed-${randomUUID()}${outputDetails.extension}`);
     const ffmpegArgs = buildNormalizeFfmpegArgs(sourcePath, outputPath);
     await spawnNormalizeFfmpeg(ffmpegArgs);
 
@@ -356,7 +326,7 @@ export async function normalizeVideoJob(jobData) {
     }
 
     const normalizedObjectKey = `${NORMALIZED_OBJECT_PREFIX}${Date.now()}-${randomUUID()}-${path.basename(outputPath)}`;
-    const uploaded = await uploadNormalizedFile(normalizedObjectKey, outputPath);
+    const uploaded = await uploadNormalizedFile(normalizedObjectKey, outputPath, outputDetails.contentType);
 
     await markAssetStatus({
       assetKey, sourceUrl, status: 'ready', normalizedObjectKey: uploaded.key, sizeBytes: uploaded.sizeBytes, streamId,
