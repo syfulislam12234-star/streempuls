@@ -430,11 +430,13 @@ export function getAuthHeaders(extraHeaders?: Record<string, string>): Record<st
   return headers;
 }
 
-const R2_MULTIPART_PART_SIZE = 10 * 1024 * 1024;
+const R2_MULTIPART_PART_SIZE = 5 * 1024 * 1024;
 const R2_MULTIPART_MIN_PART_SIZE = 5 * 1024 * 1024;
 const R2_MULTIPART_MAX_PART_SIZE = 5 * 1024 * 1024 * 1024;
 const R2_MULTIPART_MAX_PARTS = 10_000;
 const R2_MULTIPART_MAX_OBJECT_SIZE = 5 * 1024 * 1024 * 1024 * 1024;
+const R2_MULTIPART_CONCURRENCY = 1;
+const R2_MULTIPART_MAX_ATTEMPTS = 5;
 
 function createAbortError(): Error {
   return new DOMException('The R2 upload was cancelled.', 'AbortError');
@@ -718,11 +720,12 @@ export const apiClient = {
         const end = Math.min(start + multipart!.partSizeBytes, file.size);
         const partBlob = file.slice(start, end, contentType);
         let lastError: unknown;
-        for (let attempt = 0; attempt < 5; attempt += 1) {
+        for (let attempt = 0; attempt < R2_MULTIPART_MAX_ATTEMPTS; attempt += 1) {
           if (controller.signal.aborted) throw createAbortError();
           try {
-            // Fetch a fresh 15-minute URL on every retry. Only the file MIME
-            // header is sent to R2; auth remains on this API request only.
+            // Request a new presigned URL for this same part on every attempt,
+            // including network errors/timeouts. Only Content-Type is sent to
+            // R2; auth remains on this API request only.
             const signedPart = await this.getR2MultipartPartUrl({
               key: multipart!.key,
               uploadId: multipart!.uploadId,
@@ -755,8 +758,9 @@ export const apiClient = {
             reportProgress();
             if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
             const status = (error as Error & { status?: number })?.status;
-            if (status && status >= 400 && status < 500 && status !== 408 && status !== 429 && status !== 403) throw error;
-            if (attempt < 4) {
+            const retryableStatus = !status || status === 403 || status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+            if (!retryableStatus) throw error;
+            if (attempt + 1 < R2_MULTIPART_MAX_ATTEMPTS) {
               const backoffMs = Math.min(8000, 500 * (2 ** attempt)) + Math.floor(Math.random() * 250);
               await delayWithAbort(backoffMs, controller.signal);
             }
@@ -774,7 +778,7 @@ export const apiClient = {
         }
       };
       try {
-        await Promise.all(Array.from({ length: Math.min(3, multipart.partCount) }, () => worker()));
+        await Promise.all(Array.from({ length: Math.min(R2_MULTIPART_CONCURRENCY, multipart.partCount) }, () => worker()));
       } catch (error) {
         controller.abort();
         throw error;
