@@ -125,6 +125,7 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [normalizationByUrl, setNormalizationByUrl] = useState<Record<string, 'pending' | 'processing' | 'ready' | 'failed'>>({});
 
   // Modal States
   const [editingStream, setEditingStream] = useState<StreamRecord | null>(null);
@@ -133,6 +134,21 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
   const [selectedTelemetryStream, setSelectedTelemetryStream] = useState<StreamRecord | null>(null);
 
   const isPollingRef = useRef(false);
+
+  const loadNormalizationStatuses = async () => {
+    try {
+      const assets = await apiClient.getUploads();
+      const nextStatuses: Record<string, 'pending' | 'processing' | 'ready' | 'failed'> = {};
+      for (const asset of assets) {
+        nextStatuses[asset.url] = asset.normalization_status === 'ready' || asset.normalization_status === 'failed' || asset.normalization_status === 'processing'
+          ? asset.normalization_status
+          : 'pending';
+      }
+      setNormalizationByUrl(nextStatuses);
+    } catch {
+      // Keep the most recent known status during transient API failures.
+    }
+  };
 
   // 1. Fetch Streams from backend
   const loadStreams = async (showLoadingSpinner = false) => {
@@ -159,13 +175,15 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
 
   useEffect(() => {
     loadStreams(true);
+    void loadNormalizationStatuses();
 
-    // Periodic refresh every 3 seconds for live uptime and status updates
+    // Refresh stream health and normalization state while this dashboard is open.
     const pollId = setInterval(() => {
       if (typeof document !== 'undefined' && !document.hidden) {
         loadStreams(false);
+        void loadNormalizationStatuses();
       }
-    }, 3000);
+    }, 2000);
 
     return () => clearInterval(pollId);
   }, []);
@@ -175,6 +193,18 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
     setActionLoadingId(stream.id);
     setActionError(null);
     try {
+      const uploads = await apiClient.getUploads();
+      const uploadedAsset = uploads.find((asset) => asset.url === stream.video_url);
+      const normalizationStatus = uploadedAsset?.normalization_status
+        || stream.normalization_status
+        || (stream.normalized === false ? 'pending' : 'ready');
+      if (normalizationStatus !== 'ready') {
+        setActionError(normalizationStatus === 'failed'
+          ? 'Video normalization failed. Please upload the video again before going live.'
+          : 'Video is not ready for live streaming. It is being processed (normalization) and cannot go live until completed.');
+        await loadNormalizationStatuses();
+        return;
+      }
       await apiClient.startStream(stream.id);
       await loadStreams(false);
     } catch (err: any) {
@@ -514,6 +544,10 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
             {streams.map((stream) => {
               const isLive = stream.status === 'live';
+              const normalizationStatus = normalizationByUrl[stream.video_url]
+                || stream.normalization_status
+                || (stream.normalized === false ? 'pending' : 'ready');
+              const isVideoReadyToStream = normalizationStatus === 'ready';
               const platformInfo = getPlatformLabel(stream.rtmp_server_url);
               const customThumb = stream.thumbnail_url?.trim() || null;
               const friendlyThumb = customThumb || getFriendlyThumbnail(stream.video_url);
@@ -799,13 +833,19 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
                       ) : (
                         <button
                           onClick={() => handleStartLive(stream)}
-                          disabled={isActionLoading}
+                          disabled={isActionLoading || !isVideoReadyToStream}
+                          title={!isVideoReadyToStream ? 'Video must finish normalization before it can go live.' : undefined}
                           className="w-full flex items-center justify-center space-x-2 py-3 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-60 text-white font-extrabold text-sm shadow-md shadow-emerald-950/60 hover:shadow-lg hover:shadow-emerald-500/25 transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
                         >
                           {isActionLoading ? (
                             <>
                               <Loader2 className="w-4 h-4 animate-spin" />
                               <span>Starting live...</span>
+                            </>
+                          ) : !isVideoReadyToStream ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              <span>{normalizationStatus === 'failed' ? 'Video Processing Failed' : 'Video Processing'}</span>
                             </>
                           ) : (
                             <>
@@ -814,6 +854,13 @@ export const StreamingDashboard: React.FC<StreamingDashboardProps> = ({
                             </>
                           )}
                         </button>
+                      )}
+                      {!isLive && !isVideoReadyToStream && (
+                        <div role="status" aria-live="polite" className={`rounded-xl border p-3 text-xs ${normalizationStatus === 'failed' ? 'border-red-800 bg-red-950/40 text-red-200' : 'border-amber-800 bg-amber-950/40 text-amber-200'}`}>
+                          {normalizationStatus === 'failed'
+                            ? 'Video normalization failed. Re-upload this video before starting the stream.'
+                            : 'Video is not ready for live streaming. It is being processed (normalization) and cannot go live until completed.'}
+                        </div>
                       )}
 
                       {/* Secondary Action Buttons: Edit, Preview, and Delete */}

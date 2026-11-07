@@ -267,6 +267,10 @@ export interface StreamRecord {
   scheduled_for?: string;
   status: 'idle' | 'starting' | 'live' | 'reconnecting' | 'failed' | 'stopping';
   direct_copy_mode: boolean;
+  normalized?: boolean;
+  normalization_status?: 'pending' | 'processing' | 'ready' | 'failed' | null;
+  normalized_object_key?: string | null;
+  normalization_error?: string | null;
   video_mode?: 'copy' | 'transcode';
   transcode_reason?: string | null;
   health_status?: string;
@@ -317,6 +321,10 @@ export interface UploadedAssetResponse {
   resolution: string;
   codec: string;
   titleSuggestion: string;
+  normalized?: boolean;
+  normalization_status?: 'pending' | 'processing' | 'ready' | 'failed' | null;
+  normalized_object_key?: string | null;
+  normalization_error?: string | null;
 }
 
 // External Admin Application Backend Configuration

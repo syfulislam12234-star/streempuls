@@ -429,6 +429,20 @@ test('direct R2 upload, confirmation, private preview, and per-user asset isolat
   assert.equal(multipartConfirmation.asset.sizeBytes, multipartBytes.length);
   assert.equal(multipartConfirmation.asset.contentType, 'video/mp4');
 
+  const pendingStreamResponse = await postJson(baseUrl, '/api/streams', {
+    title: 'Normalization gate test',
+    videoUrl: multipartConfirmation.asset.url,
+    streamKey: 'normalization-test-key',
+    rtmpServerUrl: 'rtmp://a.rtmp.youtube.com/live2',
+  }, ownerToken);
+  assert.equal(pendingStreamResponse.status, 201);
+  const pendingStream = (await pendingStreamResponse.json()).stream;
+  const blockedStartResponse = await postJson(baseUrl, `/api/streams/${pendingStream.id}/start`, {}, ownerToken);
+  assert.equal(blockedStartResponse.status, 409);
+  const blockedStart = await blockedStartResponse.json();
+  assert.equal(blockedStart.code, 'VIDEO_NORMALIZATION_PENDING');
+  assert.match(blockedStart.error, /cannot go live until completed/i);
+
   const abortInitResponse = await postJson(baseUrl, '/api/storage/multipart/initiate', {
     fileName: 'cancelled-video.mp4',
     contentType: 'video/mp4',

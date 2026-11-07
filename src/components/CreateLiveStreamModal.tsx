@@ -135,6 +135,7 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [userUploads, setUserUploads] = useState<any[]>([]);
+  const [selectedNormalizationStatus, setSelectedNormalizationStatus] = useState<'pending' | 'processing' | 'ready' | 'failed'>('ready');
   const [isInlinePreviewOpen, setIsInlinePreviewOpen] = useState(false);
   const [inlinePreviewUrl, setInlinePreviewUrl] = useState<string>('');
   const [inlinePreviewError, setInlinePreviewError] = useState<string | null>(null);
@@ -229,16 +230,39 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
     }
   }, [editingStream, isOpen]);
 
-  // Load uploaded videos from library
+  // Keep uploaded-video normalization state fresh while this modal is open.
+  // The backend writes pending/processing/ready/failed to the asset catalog.
   useEffect(() => {
-    if (isOpen) {
-      apiClient.getUploads().then((items) => {
-        if (Array.isArray(items)) setUserUploads(items);
-      }).catch((error) => {
-        setUploadError(error instanceof Error ? error.message : 'Could not load your private video library.');
-      });
-    }
-  }, [isOpen]);
+    if (!isOpen) return;
+    let active = true;
+    const refreshUploads = async () => {
+      try {
+        const items = await apiClient.getUploads();
+        if (!active || !Array.isArray(items)) return;
+        setUserUploads(items);
+        const selectedAsset = items.find((item) => item.url === selectedVideoUrl);
+        if (selectedAsset) {
+          const status = selectedAsset.normalization_status;
+          setSelectedNormalizationStatus(status === 'ready' || status === 'processing' || status === 'failed'
+            ? status
+            : 'pending');
+        }
+      } catch (error) {
+        if (active && userUploads.length === 0) {
+          setUploadError(error instanceof Error ? error.message : 'Could not load your private video library.');
+        }
+      }
+    };
+
+    void refreshUploads();
+    const pollId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refreshUploads();
+    }, 2000);
+    return () => {
+      active = false;
+      window.clearInterval(pollId);
+    };
+  }, [isOpen, selectedVideoUrl]);
 
   useEffect(() => {
     if (!isInlinePreviewOpen || !selectedVideoUrl.trim()) {
@@ -296,6 +320,8 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
         setUploadProgress(percent);
       });
       setSelectedVideoUrl(asset.url);
+      setSelectedNormalizationStatus(asset.normalization_status === 'ready' ? 'ready' : 'pending');
+      setUserUploads((uploads) => [asset, ...uploads.filter((item) => item.url !== asset.url)]);
       const cleanName = asset.titleSuggestion || file.name.replace(/\.[^/.]+$/, '');
       setSelectedVideoTitle(cleanName);
       if (!titleTouched || !streamTitle.trim()) {
@@ -384,6 +410,13 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
   const handleSubmit = async (autoStart: boolean) => {
     if (!selectedVideoUrl) {
       setSubmitError('Please choose a video in Step 1.');
+      setStep(1);
+      return;
+    }
+    if (autoStart && selectedNormalizationStatus !== 'ready') {
+      setSubmitError(selectedNormalizationStatus === 'failed'
+        ? 'Video processing failed. Please upload the video again before going live.'
+        : 'Video is not ready for live streaming. It is being processed (normalization) and cannot go live until completed.');
       setStep(1);
       return;
     }
@@ -609,6 +642,7 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
                           onClick={() => {
                             setSelectedVideoUrl(item.url);
                             setSelectedVideoTitle(item.title);
+                            setSelectedNormalizationStatus('ready');
                             if (!titleTouched || !streamTitle.trim()) {
                               setStreamTitle(item.title);
                             }
@@ -669,6 +703,10 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
                           key={item.url}
                           onClick={() => {
                             setSelectedVideoUrl(item.url);
+                            setSelectedNormalizationStatus(item.normalization_status === 'ready'
+                              ? 'ready'
+                              : item.normalization_status === 'failed' ? 'failed'
+                              : item.normalization_status === 'processing' ? 'processing' : 'pending');
                             const clean = item.fileName || 'Uploaded Video';
                             setSelectedVideoTitle(clean);
                             if (!titleTouched || !streamTitle.trim()) {
@@ -687,6 +725,9 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
                           <div>
                             <h5 className="text-xs font-bold text-white line-clamp-1">{item.fileName}</h5>
                             <p className="text-[11px] text-slate-400 mt-0.5">Your Uploaded Clip &middot; {item.fileSizeMb} MB</p>
+                            <p className={`mt-1 text-[10px] font-semibold ${item.normalization_status === 'ready' ? 'text-emerald-400' : item.normalization_status === 'failed' ? 'text-red-400' : 'text-amber-300'}`}>
+                              {item.normalization_status === 'ready' ? 'Ready to stream' : item.normalization_status === 'failed' ? 'Processing failed' : item.normalization_status === 'processing' ? 'Normalizing video…' : 'Waiting for normalization'}
+                            </p>
                           </div>
                           <div className="mt-2 pt-2 border-t border-slate-800 flex justify-end">
                             {isSelected ? (
@@ -799,6 +840,23 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
                       <span>{isInlinePreviewOpen ? 'Hide Preview' : 'Preview Clip'}</span>
                     </button>
                   </div>
+                </div>
+              )}
+
+              {selectedVideoUrl && selectedNormalizationStatus !== 'ready' && (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className={`flex items-start gap-2 rounded-xl border p-3 text-xs ${selectedNormalizationStatus === 'failed' ? 'border-red-800 bg-red-950/50 text-red-200' : 'border-amber-800 bg-amber-950/40 text-amber-200'}`}
+                >
+                  {selectedNormalizationStatus === 'failed'
+                    ? <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+                    : <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-amber-400" />}
+                  <span>
+                    {selectedNormalizationStatus === 'failed'
+                      ? 'Video normalization failed. Please upload the video again before going live.'
+                      : 'Video is not ready for live streaming. It is being processed (normalization) and cannot go live until completed. This status updates automatically.'}
+                  </span>
                 </div>
               )}
 
@@ -1150,6 +1208,25 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
           {/* ================================================================ */}
           {step === 3 && (
             <div className="space-y-5">
+              <div
+                role="status"
+                aria-live="polite"
+                className={`flex items-start gap-2 rounded-xl border p-3 text-xs ${selectedNormalizationStatus === 'ready' ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200' : selectedNormalizationStatus === 'failed' ? 'border-red-800 bg-red-950/50 text-red-200' : 'border-amber-800 bg-amber-950/40 text-amber-200'}`}
+              >
+                {selectedNormalizationStatus === 'ready'
+                  ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+                  : selectedNormalizationStatus === 'failed'
+                    ? <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+                    : <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-amber-400" />}
+                <span>
+                  {selectedNormalizationStatus === 'ready'
+                    ? 'Video is fully prepared for live broadcasting.'
+                    : selectedNormalizationStatus === 'failed'
+                      ? 'Video normalization failed. Please upload the video again before going live.'
+                      : 'Video is not ready for live streaming. It is being processed (normalization) and cannot go live until completed.'}
+                </span>
+              </div>
+
               {/* 1. Required Stream Title Field */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
@@ -1892,7 +1969,8 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
                 <button
                   type="button"
                   onClick={() => handleSubmit(true)}
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || selectedNormalizationStatus !== 'ready'}
+                  title={selectedNormalizationStatus !== 'ready' ? 'Video must finish normalization before it can go live.' : undefined}
                   className="flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-red-600 via-rose-600 to-red-600 hover:from-red-500 hover:to-rose-500 text-white text-xs font-extrabold cursor-pointer transition-all duration-300 ease-in-out hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-red-950/80 hover:shadow-xl hover:shadow-red-500/30 disabled:opacity-50"
                 >
                   {isSubmitting ? (
@@ -1903,7 +1981,7 @@ export const CreateLiveStreamModal: React.FC<CreateLiveStreamModalProps> = ({
                   ) : (
                     <>
                       <Radio className="w-3.5 h-3.5 animate-pulse" />
-                      <span>Start Live Stream</span>
+                      <span>{selectedNormalizationStatus === 'ready' ? 'Start Live Stream' : 'Video Processing'}</span>
                     </>
                   )}
                 </button>

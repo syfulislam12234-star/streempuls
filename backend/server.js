@@ -1266,6 +1266,23 @@ app.post('/api/streams/:id/start', async (req, res, next) => {
     const { redisClient, streamQueue } = await import('./queue.js');
     const user = req.streamUser;
     const userId = user.id;
+    const streamForStart = readStreams().find((stream) => stream.id === req.params.id);
+    if (streamForStart && getAuthorizedStream(req.streamUser, [streamForStart], streamForStart.id)) {
+      const uploadAsset = readUploadedAssets().find((asset) => (
+        asset.ownerUserId === userId && asset.url === streamForStart.video_url
+      ));
+      if (uploadAsset && uploadAsset.normalization_status !== 'ready') {
+        const status = uploadAsset.normalization_status || 'pending';
+        return res.status(409).json({
+          success: false,
+          code: 'VIDEO_NORMALIZATION_PENDING',
+          normalizationStatus: status,
+          error: status === 'failed'
+            ? 'Video normalization failed. Please upload the video again before going live.'
+            : 'Video is not ready for live streaming. It is being processed (normalization) and cannot go live until completed.',
+        });
+      }
+    }
     const { channelLimit } = getStreamLimits(user);
     const result = await enqueueStreamStart({
       redis: redisClient,
