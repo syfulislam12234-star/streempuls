@@ -159,6 +159,28 @@ function getR2CorsOrigins() {
     });
 }
 
+function getAllowedR2RequestOrigin(req) {
+  const requestOrigin = req.get('origin');
+  if (!requestOrigin) return null;
+  try {
+    const normalizedOrigin = new URL(requestOrigin).origin;
+    return getR2CorsOrigins().includes(normalizedOrigin) ? normalizedOrigin : null;
+  } catch {
+    return null;
+  }
+}
+
+function findOwnedMultipartUpload(userId, key, uploadId) {
+  const assets = readUploadedAssets();
+  const assetIndex = assets.findIndex((asset) => (
+    asset.key === key &&
+    asset.ownerUserId === userId &&
+    asset.multipartUploadId === uploadId &&
+    asset.status === 'pending'
+  ));
+  return assetIndex < 0 ? null : { assets, assetIndex, asset: assets[assetIndex] };
+}
+
 function readUsers() {
   // Keep this accessor synchronous: authentication and route handlers use it
   // inline. Stream-access code performs Supabase reads through its async API.
@@ -464,6 +486,221 @@ app.post('/api/storage/presigned-upload', async (req, res, next) => {
   }
 });
 
+// Initiate a private, owner-scoped R2 multipart upload. Video parts stream
+// directly from the browser to R2; the API only signs control calls.
+app.post('/api/storage/multipart/initiate', async (req, res, next) => {
+  let createdUploadId;
+  let createdKey;
+  try {
+    const user = getAuthenticatedUser(req);
+    if (!user) return res.status(401).json({ success: false, error: 'Authentication required.' });
+    const { fileName, contentType, fileSizeBytes, partSizeBytes = 10 * 1024 * 1024 } = req.body || {};
+    if (typeof fileName !== 'string' || !fileName.trim()) {
+      return res.status(400).json({ success: false, error: 'fileName is required.' });
+    }
+    if (typeof contentType !== 'string' || !/^video\/[a-z0-9.+-]+$/i.test(contentType)) {
+      return res.status(400).json({ success: false, error: 'A valid video Content-Type is required.' });
+    }
+    const size = Number(fileSizeBytes);
+    const partSize = Number(partSizeBytes);
+    const minPartSize = 5 * 1024 * 1024;
+    const maxPartSize = 5 * 1024 * 1024 * 1024;
+    const maxObjectSize = 5 * 1024 * 1024 * 1024 * 1024;
+    if (!Number.isSafeInteger(size) || size <= 0 || size > maxObjectSize) {
+      return res.status(400).json({ success: false, error: 'fileSizeBytes must be between 1 byte and 5 TiB.' });
+    }
+    if (!Number.isSafeInteger(partSize) || partSize < minPartSize || partSize > maxPartSize) {
+      return res.status(400).json({ success: false, error: 'partSizeBytes must be between 5 MiB and 5 GiB.' });
+    }
+    const partCount = Math.ceil(size / partSize);
+    if (partCount > 10_000) {
+      return res.status(400).json({ success: false, error: 'The requested chunk size would exceed R2’s 10,000-part limit.' });
+    }
+    const requestOrigin = req.get('origin');
+    const allowedOrigin = getAllowedR2RequestOrigin(req);
+    if (requestOrigin && !allowedOrigin) {
+      return res.status(403).json({ success: false, error: `Frontend origin '${requestOrigin}' is not allowed to request direct Cloudflare R2 uploads.` });
+    }
+
+    const { bucket } = getR2Configuration();
+    const safeFileName = path.basename(fileName.trim()).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const key = `media/${Date.now()}-${randomUUID()}-${safeFileName}`;
+    const client = await getR2Client();
+    const { CreateMultipartUploadCommand } = await import('@aws-sdk/client-s3');
+    const created = await client.send(new CreateMultipartUploadCommand({ Bucket: bucket, Key: key, ContentType: contentType }));
+    if (!created.UploadId) throw new Error('R2 did not return a multipart upload ID.');
+    createdUploadId = created.UploadId;
+    createdKey = key;
+
+    const assets = readUploadedAssets();
+    assets.unshift({
+      key,
+      ownerUserId: user.id,
+      fileName: safeFileName,
+      contentType,
+      expectedSizeBytes: size,
+      expectedPartCount: partCount,
+      partSizeBytes: partSize,
+      multipartUploadId: created.UploadId,
+      multipartStatus: 'in_progress',
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    });
+    writeJsonFile(UPLOADED_ASSETS_FILE, assets);
+    return res.status(200).json({
+      success: true,
+      key,
+      uploadId: created.UploadId,
+      provider: 'r2',
+      publicUrl: getR2PublicObjectUrl(key),
+      partSizeBytes: partSize,
+      partCount,
+      cors: {
+        allowedOrigin: allowedOrigin || null,
+        allowedMethods: ['PUT'],
+        allowedHeaders: ['Content-Type'],
+        exposeHeaders: ['ETag'],
+      },
+    });
+  } catch (error) {
+    if (createdUploadId && createdKey) {
+      try {
+        const client = await getR2Client();
+        const { AbortMultipartUploadCommand } = await import('@aws-sdk/client-s3');
+        const { bucket } = getR2Configuration();
+        await client.send(new AbortMultipartUploadCommand({ Bucket: bucket, Key: createdKey, UploadId: createdUploadId }));
+      } catch {}
+    }
+    return next(error);
+  }
+});
+
+app.post('/api/storage/multipart/presign-part', async (req, res, next) => {
+  try {
+    const user = getAuthenticatedUser(req);
+    if (!user) return res.status(401).json({ success: false, error: 'Authentication required.' });
+    const { key, uploadId, partNumber } = req.body || {};
+    const number = Number(partNumber);
+    if (typeof key !== 'string' || !key.startsWith('media/') || key.split('/').includes('..') || typeof uploadId !== 'string') {
+      return res.status(400).json({ success: false, error: 'A valid key and uploadId are required.' });
+    }
+    const owned = findOwnedMultipartUpload(user.id, key, uploadId);
+    if (!owned || owned.asset.multipartStatus !== 'in_progress') {
+      return res.status(404).json({ success: false, error: 'Multipart upload was not found for this user.' });
+    }
+    if (!Number.isInteger(number) || number < 1 || number > owned.asset.expectedPartCount || number > 10_000) {
+      return res.status(400).json({ success: false, error: 'partNumber is outside the expected upload range.' });
+    }
+    const requestOrigin = req.get('origin');
+    const allowedOrigin = getAllowedR2RequestOrigin(req);
+    if (requestOrigin && !allowedOrigin) {
+      return res.status(403).json({ success: false, error: `Frontend origin '${requestOrigin}' is not allowed to request direct Cloudflare R2 uploads.` });
+    }
+    const { bucket } = getR2Configuration();
+    const client = await getR2Client();
+    const { UploadPartCommand } = await import('@aws-sdk/client-s3');
+    const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
+    const uploadUrl = await getSignedUrl(client, new UploadPartCommand({
+      Bucket: bucket,
+      Key: key,
+      UploadId: uploadId,
+      PartNumber: number,
+    }), { expiresIn: 900 });
+    return res.status(200).json({
+      success: true,
+      uploadUrl,
+      partNumber: number,
+      headers: owned.asset.contentType ? { 'Content-Type': owned.asset.contentType } : {},
+      cors: {
+        allowedOrigin: allowedOrigin || null,
+        allowedMethods: ['PUT'],
+        allowedHeaders: ['Content-Type'],
+        exposeHeaders: ['ETag'],
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/storage/multipart/complete', async (req, res, next) => {
+  try {
+    const user = getAuthenticatedUser(req);
+    if (!user) return res.status(401).json({ success: false, error: 'Authentication required.' });
+    const { key, uploadId, parts } = req.body || {};
+    if (typeof key !== 'string' || !key.startsWith('media/') || key.split('/').includes('..') || typeof uploadId !== 'string' || !Array.isArray(parts)) {
+      return res.status(400).json({ success: false, error: 'A valid key, uploadId, and parts array are required.' });
+    }
+    const assets = readUploadedAssets();
+    const assetIndex = assets.findIndex((asset) => (
+      asset.key === key && asset.ownerUserId === user.id && asset.multipartUploadId === uploadId && asset.status === 'pending'
+    ));
+    if (assetIndex < 0) return res.status(404).json({ success: false, error: 'Multipart upload was not found for this user.' });
+    const asset = assets[assetIndex];
+    if (asset.multipartStatus === 'completed') {
+      return res.status(200).json({ success: true, key, alreadyCompleted: true });
+    }
+    if (asset.multipartStatus !== 'in_progress') {
+      return res.status(409).json({ success: false, error: 'Multipart upload is not active.' });
+    }
+    if (parts.length !== asset.expectedPartCount) {
+      return res.status(400).json({ success: false, error: `Exactly ${asset.expectedPartCount} completed parts are required.` });
+    }
+    const normalizedParts = parts.map((part) => ({
+      PartNumber: Number(part?.PartNumber ?? part?.partNumber),
+      ETag: part?.ETag ?? part?.etag,
+    })).sort((a, b) => a.PartNumber - b.PartNumber);
+    const invalidParts = normalizedParts.some((part, index) => (
+      !Number.isInteger(part.PartNumber) || part.PartNumber !== index + 1 ||
+      typeof part.ETag !== 'string' || !part.ETag.length || part.ETag.length > 256 || /[\r\n]/.test(part.ETag)
+    ));
+    if (invalidParts) return res.status(400).json({ success: false, error: 'Parts must contain each sequential part number and its R2 ETag.' });
+
+    const { bucket } = getR2Configuration();
+    const client = await getR2Client();
+    const { CompleteMultipartUploadCommand } = await import('@aws-sdk/client-s3');
+    const result = await client.send(new CompleteMultipartUploadCommand({
+      Bucket: bucket,
+      Key: key,
+      UploadId: uploadId,
+      MultipartUpload: { Parts: normalizedParts },
+    }));
+    assets[assetIndex] = { ...asset, multipartStatus: 'completed', multipartCompletedAt: new Date().toISOString() };
+    writeJsonFile(UPLOADED_ASSETS_FILE, assets);
+    return res.status(200).json({ success: true, key, etag: result.ETag || null });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post('/api/storage/multipart/abort', async (req, res, next) => {
+  try {
+    const user = getAuthenticatedUser(req);
+    if (!user) return res.status(401).json({ success: false, error: 'Authentication required.' });
+    const { key, uploadId } = req.body || {};
+    if (typeof key !== 'string' || !key.startsWith('media/') || key.split('/').includes('..') || typeof uploadId !== 'string') {
+      return res.status(400).json({ success: false, error: 'A valid key and uploadId are required.' });
+    }
+    const assets = readUploadedAssets();
+    const assetIndex = assets.findIndex((asset) => (
+      asset.key === key && asset.ownerUserId === user.id && asset.multipartUploadId === uploadId && asset.status === 'pending'
+    ));
+    if (assetIndex < 0) return res.status(404).json({ success: false, error: 'Multipart upload was not found for this user.' });
+    if (assets[assetIndex].multipartStatus === 'completed') {
+      return res.status(200).json({ success: true, alreadyCompleted: true });
+    }
+    const { bucket } = getR2Configuration();
+    const client = await getR2Client();
+    const { AbortMultipartUploadCommand } = await import('@aws-sdk/client-s3');
+    await client.send(new AbortMultipartUploadCommand({ Bucket: bucket, Key: key, UploadId: uploadId }));
+    assets.splice(assetIndex, 1);
+    writeJsonFile(UPLOADED_ASSETS_FILE, assets);
+    return res.status(200).json({ success: true, aborted: true });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.post('/api/storage/confirm-upload', async (req, res, next) => {
   try {
     const user = getAuthenticatedUser(req);
@@ -486,7 +723,7 @@ app.post('/api/storage/confirm-upload', async (req, res, next) => {
     const object = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
     const contentLength = Number(object.ContentLength);
     const contentType = String(object.ContentType || '').split(';', 1)[0].trim().toLowerCase();
-    if (!Number.isSafeInteger(contentLength) || contentLength <= 0 || contentLength > 5_000_000_000) {
+    if (!Number.isSafeInteger(contentLength) || contentLength <= 0 || contentLength > 5 * 1024 * 1024 * 1024 * 1024) {
       return res.status(422).json({ success: false, error: 'R2 object size is missing or outside the supported upload limit.' });
     }
     if (!/^video\/[a-z0-9.+-]+$/i.test(contentType)) {

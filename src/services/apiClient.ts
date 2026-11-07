@@ -430,6 +430,85 @@ export function getAuthHeaders(extraHeaders?: Record<string, string>): Record<st
   return headers;
 }
 
+const R2_MULTIPART_PART_SIZE = 10 * 1024 * 1024;
+const R2_MULTIPART_MIN_PART_SIZE = 5 * 1024 * 1024;
+const R2_MULTIPART_MAX_PART_SIZE = 5 * 1024 * 1024 * 1024;
+const R2_MULTIPART_MAX_PARTS = 10_000;
+const R2_MULTIPART_MAX_OBJECT_SIZE = 5 * 1024 * 1024 * 1024 * 1024;
+
+function createAbortError(): Error {
+  return new DOMException('The R2 upload was cancelled.', 'AbortError');
+}
+
+function delayWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(createAbortError());
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(createAbortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function putR2Part(
+  uploadUrl: string,
+  body: Blob,
+  contentType: string,
+  signal: AbortSignal,
+  onProgress: (loadedBytes: number) => void,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(createAbortError());
+    const xhr = new XMLHttpRequest();
+    const cleanup = () => signal.removeEventListener('abort', abortRequest);
+    const abortRequest = () => xhr.abort();
+    xhr.open('PUT', uploadUrl);
+    xhr.withCredentials = false;
+    xhr.timeout = 5 * 60 * 1000;
+    // Content-Type is the only application header sent to R2. The bucket CORS
+    // policy must allow this header and expose ETag for multipart completion.
+    if (contentType) xhr.setRequestHeader('Content-Type', contentType);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded);
+    };
+    xhr.onload = () => {
+      cleanup();
+      if (xhr.status < 200 || xhr.status >= 300) {
+        const error = new Error(`R2 part upload failed with HTTP ${xhr.status}.`);
+        (error as Error & { status?: number }).status = xhr.status;
+        reject(error);
+        return;
+      }
+      const etag = xhr.getResponseHeader('ETag');
+      if (!etag) {
+        reject(new Error('R2 did not expose the uploaded part ETag. Add ETag to the bucket CORS ExposeHeaders list.'));
+        return;
+      }
+      resolve(etag);
+    };
+    xhr.onerror = () => {
+      cleanup();
+      reject(new Error('Network error while uploading a Cloudflare R2 multipart chunk.'));
+    };
+    xhr.ontimeout = () => {
+      cleanup();
+      reject(new Error('Cloudflare R2 multipart chunk upload timed out.'));
+    };
+    xhr.onabort = () => {
+      cleanup();
+      reject(createAbortError());
+    };
+    signal.addEventListener('abort', abortRequest, { once: true });
+    xhr.send(body);
+  });
+}
+
 export const apiClient = {
   // 1. Upload Video to Supabase Storage ('stream-assets') / Server Media Vault
   async uploadVideo(file: File, onProgress?: (percent: number) => void): Promise<UploadedAssetResponse> {
@@ -511,80 +590,231 @@ export const apiClient = {
     return data;
   },
 
-  // 1d. Cloudflare R2 Direct Upload: Stream video buffer directly to Cloudflare R2 bucket,
-  // completely bypassing the main backend server to save host bandwidth!
+  async initiateR2MultipartUpload(payload: {
+    fileName: string;
+    contentType: string;
+    fileSizeBytes: number;
+    partSizeBytes: number;
+  }, signal?: AbortSignal): Promise<{
+    key: string;
+    uploadId: string;
+    publicUrl: string;
+    partSizeBytes: number;
+    partCount: number;
+  }> {
+    const res = await fetch('/api/storage/multipart/initiate', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+      signal,
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      if (res.status === 401) throw new Error(AUTH_REQUIRED_MESSAGE);
+      throw new Error(data.error || 'Could not initiate the Cloudflare R2 multipart upload.');
+    }
+    return data;
+  },
+
+  async getR2MultipartPartUrl(payload: {
+    key: string;
+    uploadId: string;
+    partNumber: number;
+  }, signal?: AbortSignal): Promise<{ uploadUrl: string; headers: Record<string, string> }> {
+    const res = await fetch('/api/storage/multipart/presign-part', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+      signal,
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      if (res.status === 401) throw new Error(AUTH_REQUIRED_MESSAGE);
+      throw new Error(data.error || `Could not sign R2 part ${payload.partNumber}.`);
+    }
+    return data;
+  },
+
+  async completeR2MultipartUpload(payload: {
+    key: string;
+    uploadId: string;
+    parts: Array<{ PartNumber: number; ETag: string }>;
+  }, signal?: AbortSignal): Promise<void> {
+    const res = await fetch('/api/storage/multipart/complete', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+      signal,
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      if (res.status === 401) throw new Error(AUTH_REQUIRED_MESSAGE);
+      throw new Error(data.error || 'Could not complete the Cloudflare R2 multipart upload.');
+    }
+  },
+
+  async abortR2MultipartUpload(key: string, uploadId: string): Promise<void> {
+    const res = await fetch('/api/storage/multipart/abort', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ key, uploadId }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Could not clean up the incomplete Cloudflare R2 upload.');
+    }
+  },
+
+  // Stream independent chunks directly to R2, retrying transient failures and
+  // completing only after every part's ETag has been collected.
   async uploadDirectToR2(
     file: File,
-    onProgress?: (percent: number) => void
+    onProgress?: (percent: number) => void,
+    signal?: AbortSignal,
   ): Promise<UploadedAssetResponse> {
-    if (file.size > 5_000_000_000) {
-      throw new Error('This file exceeds the 5 GB single-request R2 upload limit. Multipart uploads are not configured.');
+    if (!Number.isSafeInteger(file.size) || file.size <= 0 || file.size > R2_MULTIPART_MAX_OBJECT_SIZE) {
+      throw new Error('This file size is outside Cloudflare R2 multipart upload limits (5 TiB maximum).');
     }
-
+    if (signal?.aborted) throw createAbortError();
     const fileSizeMb = +(file.size / (1024 * 1024)).toFixed(1);
     const contentType = file.type || 'video/mp4';
-
-    // 1. Get secure presigned upload URL for Cloudflare R2
-    const presigned = await this.getPresignedUploadUrl({
-      fileName: file.name,
-      contentType,
-      fileSizeMb,
-      preferredProvider: 'r2',
-    });
-
-    let uploadUrl: URL;
+    const desiredPartSize = Math.max(
+      R2_MULTIPART_PART_SIZE,
+      Math.ceil(file.size / R2_MULTIPART_MAX_PARTS / (1024 * 1024)) * 1024 * 1024,
+    );
+    const partSizeBytes = Math.max(R2_MULTIPART_MIN_PART_SIZE, Math.min(desiredPartSize, R2_MULTIPART_MAX_PART_SIZE));
+    const controller = new AbortController();
+    const relayAbort = () => controller.abort();
+    signal?.addEventListener('abort', relayAbort, { once: true });
+    if (signal?.aborted) controller.abort();
+    let multipart: { key: string; uploadId: string; publicUrl: string; partSizeBytes: number; partCount: number } | undefined;
+    let multipartCompleted = false;
     try {
-      uploadUrl = new URL(presigned.uploadUrl);
-    } catch {
-      throw new Error('The storage API did not return a valid absolute Cloudflare R2 upload URL.');
-    }
-    if (presigned.provider !== 'r2' || uploadUrl.protocol !== 'https:' || uploadUrl.origin === window.location.origin) {
-      throw new Error('The storage API did not return a direct HTTPS Cloudflare R2 upload URL.');
-    }
-
-    // Validate the backend's signed value, but never forward its header map:
-    // only Content-Type is required for this R2 PUT; auth/custom API headers
-    // must not be sent to the bucket.
-    const signedContentType = Object.entries(presigned.headers || {})
-      .find(([name]) => name.toLowerCase() === 'content-type')?.[1];
-    if (!signedContentType || signedContentType !== contentType) {
-      throw new Error('The presigned upload Content-Type does not match the selected file. Request a new upload URL and retry.');
-    }
-
-    // 2. Send the File directly to R2 in one signed PUT; video bytes never go to Express.
-    // Single-part PutObject supports up to 5 GB. This client does not use multipart.
-    await new Promise<void>((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('PUT', uploadUrl.toString());
-      xhr.withCredentials = false;
-
-      // Match the exact file.type used to create the signature; add no other
-      // application headers to the cross-origin bucket request.
-      xhr.setRequestHeader('Content-Type', contentType);
-
-      if (onProgress && xhr.upload) {
-        xhr.upload.onprogress = (event) => {
-          if (event.lengthComputable) {
-            const percent = Math.round((event.loaded / event.total) * 100);
-            onProgress(percent);
-          }
-        };
+      multipart = await this.initiateR2MultipartUpload({
+        fileName: file.name,
+        contentType,
+        fileSizeBytes: file.size,
+        partSizeBytes,
+      }, controller.signal);
+      const expectedPartCount = Math.ceil(file.size / multipart.partSizeBytes);
+      if (!multipart.key || !multipart.uploadId || multipart.partCount !== expectedPartCount || multipart.partCount > R2_MULTIPART_MAX_PARTS) {
+        throw new Error('The storage API returned invalid multipart upload details.');
       }
 
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve();
-        } else {
-          reject(new Error(`Cloudflare R2 direct upload failed with HTTP status ${xhr.status}.`));
+      const completedParts: Array<{ PartNumber: number; ETag: string }> = [];
+      const partProgress = new Map<number, number>();
+      let completedBytes = 0;
+      let lastReportedPercent = 0;
+      const reportProgress = () => {
+        const activeBytes = [...partProgress.values()].reduce((total, loaded) => total + loaded, 0);
+        const percent = Math.min(99, Math.floor(((completedBytes + activeBytes) / file.size) * 100));
+        lastReportedPercent = Math.max(lastReportedPercent, percent);
+        onProgress?.(lastReportedPercent);
+      };
+      let nextPartNumber = 1;
+
+      const uploadPart = async (partNumber: number) => {
+        const start = (partNumber - 1) * multipart!.partSizeBytes;
+        const end = Math.min(start + multipart!.partSizeBytes, file.size);
+        const partBlob = file.slice(start, end, contentType);
+        let lastError: unknown;
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          if (controller.signal.aborted) throw createAbortError();
+          try {
+            // Fetch a fresh 15-minute URL on every retry. Only the file MIME
+            // header is sent to R2; auth remains on this API request only.
+            const signedPart = await this.getR2MultipartPartUrl({
+              key: multipart!.key,
+              uploadId: multipart!.uploadId,
+              partNumber,
+            }, controller.signal);
+            const signedContentType = Object.entries(signedPart.headers || {})
+              .find(([name]) => name.toLowerCase() === 'content-type')?.[1];
+            if (signedContentType !== contentType) {
+              throw new Error('The signed part Content-Type does not match the selected file.');
+            }
+            partProgress.set(partNumber, 0);
+            const etag = await putR2Part(
+              signedPart.uploadUrl,
+              partBlob,
+              contentType,
+              controller.signal,
+              (loaded) => {
+                partProgress.set(partNumber, Math.min(loaded, partBlob.size));
+                reportProgress();
+              },
+            );
+            partProgress.delete(partNumber);
+            completedBytes += partBlob.size;
+            completedParts.push({ PartNumber: partNumber, ETag: etag });
+            reportProgress();
+            return;
+          } catch (error) {
+            lastError = error;
+            partProgress.delete(partNumber);
+            reportProgress();
+            if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+            const status = (error as Error & { status?: number })?.status;
+            if (status && status >= 400 && status < 500 && status !== 408 && status !== 429 && status !== 403) throw error;
+            if (attempt < 4) {
+              const backoffMs = Math.min(8000, 500 * (2 ** attempt)) + Math.floor(Math.random() * 250);
+              await delayWithAbort(backoffMs, controller.signal);
+            }
+          }
         }
+        throw lastError instanceof Error ? lastError : new Error(`R2 part ${partNumber} failed after retries.`);
       };
 
-      xhr.onerror = () => reject(new Error('Network error during Cloudflare R2 direct stream upload'));
-      xhr.onabort = () => reject(new Error('Cloudflare R2 direct upload was cancelled'));
-      xhr.send(file);
-    });
+      const worker = async () => {
+        while (true) {
+          if (controller.signal.aborted) throw createAbortError();
+          const partNumber = nextPartNumber++;
+          if (partNumber > multipart!.partCount) return;
+          await uploadPart(partNumber);
+        }
+      };
+      try {
+        await Promise.all(Array.from({ length: Math.min(3, multipart.partCount) }, () => worker()));
+      } catch (error) {
+        controller.abort();
+        throw error;
+      }
 
-    // 3. Confirm asset metadata registration with backend catalog
+      completedParts.sort((a, b) => a.PartNumber - b.PartNumber);
+      onProgress?.(99);
+      let completionError: unknown;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          await this.completeR2MultipartUpload({
+            key: multipart.key,
+            uploadId: multipart.uploadId,
+            parts: completedParts,
+          }, controller.signal);
+          completionError = undefined;
+          multipartCompleted = true;
+          break;
+        } catch (error) {
+          completionError = error;
+          if (controller.signal.aborted || attempt === 2) throw error;
+          await delayWithAbort(Math.min(4000, 500 * (2 ** attempt)), controller.signal);
+        }
+      }
+      if (completionError) throw completionError;
+    } catch (error) {
+      controller.abort();
+      if (multipart && !multipartCompleted) {
+        try {
+          await this.abortR2MultipartUpload(multipart.key, multipart.uploadId);
+        } catch (abortError) {
+          console.warn('[R2 Multipart Cleanup Failed]', abortError);
+        }
+      }
+      throw error;
+    } finally {
+      signal?.removeEventListener('abort', relayAbort);
+    }
+
+    // Register the object only after R2 confirms assembly of all parts.
     const cleanTitle = file.name
       .replace(/\.[^/.]+$/, '')
       .replace(/[-_]/g, ' ')
@@ -594,11 +824,11 @@ export const apiClient = {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify({
-        key: presigned.key,
+        key: multipart!.key,
         fileName: file.name,
         fileSizeMb,
-        publicUrl: presigned.publicUrl,
-        provider: presigned.provider,
+        publicUrl: multipart!.publicUrl,
+        provider: 'r2',
         titleSuggestion: `${cleanTitle} 24/7 Live Stream`,
       }),
     });

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -66,11 +67,68 @@ async function registerUser(baseUrl, name) {
 test('direct R2 upload, confirmation, private preview, and per-user asset isolation', async (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'streempuls-r2-assets-'));
   const mediaObjects = new Map();
+  const multipartUploads = new Map();
   const mockR2 = createServer(async (req, res) => {
-    const pathParts = new URL(req.url, 'http://localhost').pathname.split('/').filter(Boolean);
+    const requestUrl = new URL(req.url, 'http://localhost');
+    const pathParts = requestUrl.pathname.split('/').filter(Boolean);
     const key = pathParts.slice(1).join('/');
+
     if (!key.startsWith('media/')) {
       res.writeHead(404).end();
+      return;
+    }
+
+    if (req.method === 'POST' && requestUrl.searchParams.has('uploads')) {
+      const uploadId = randomUUID();
+      multipartUploads.set(uploadId, {
+        key,
+        contentType: req.headers['content-type'] || 'application/octet-stream',
+        parts: new Map(),
+      });
+      res.writeHead(200, { 'Content-Type': 'application/xml' }).end(
+        `<CreateMultipartUploadResult><Bucket>stream-assets</Bucket><Key>${key}</Key><UploadId>${uploadId}</UploadId></CreateMultipartUploadResult>`,
+      );
+      return;
+    }
+
+    const uploadId = requestUrl.searchParams.get('uploadId');
+    if (uploadId && req.method === 'PUT') {
+      const upload = multipartUploads.get(uploadId);
+      if (!upload || upload.key !== key) {
+        res.writeHead(404, { 'Content-Type': 'application/xml' }).end('<Error><Code>NoSuchUpload</Code></Error>');
+        return;
+      }
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const partNumber = Number(requestUrl.searchParams.get('partNumber'));
+      const etag = `"part-${partNumber}"`;
+      upload.parts.set(partNumber, { body: Buffer.concat(chunks), etag });
+      res.writeHead(200, { ETag: etag }).end();
+      return;
+    }
+
+    if (uploadId && req.method === 'POST') {
+      const upload = multipartUploads.get(uploadId);
+      if (!upload || upload.key !== key) {
+        res.writeHead(404, { 'Content-Type': 'application/xml' }).end('<Error><Code>NoSuchUpload</Code></Error>');
+        return;
+      }
+      for await (const _chunk of req) {}
+      const orderedParts = [...upload.parts.entries()].sort(([a], [b]) => a - b).map(([, part]) => part);
+      mediaObjects.set(key, {
+        body: Buffer.concat(orderedParts.map((part) => part.body)),
+        contentType: upload.contentType,
+      });
+      multipartUploads.delete(uploadId);
+      res.writeHead(200, { 'Content-Type': 'application/xml' }).end(
+        `<CompleteMultipartUploadResult><Location>http://localhost/${key}</Location><Bucket>stream-assets</Bucket><Key>${key}</Key><ETag>"multipart-etag"</ETag></CompleteMultipartUploadResult>`,
+      );
+      return;
+    }
+
+    if (uploadId && req.method === 'DELETE') {
+      multipartUploads.delete(uploadId);
+      res.writeHead(204).end();
       return;
     }
 
@@ -281,4 +339,113 @@ test('direct R2 upload, confirmation, private preview, and per-user asset isolat
   assert.equal(otherConfirmResponse.status, 404);
   const otherPreviewResponse = await postJson(baseUrl, '/api/storage/preview-url', { videoUrl: confirmation.asset.url }, otherToken);
   assert.equal(otherPreviewResponse.status, 404);
+
+  const unauthenticatedMultipart = await postJson(baseUrl, '/api/storage/multipart/initiate', {
+    fileName: 'multipart-video.mp4',
+    contentType: 'video/mp4',
+    fileSizeBytes: 32,
+    partSizeBytes: 5 * 1024 * 1024,
+  });
+  assert.equal(unauthenticatedMultipart.status, 401);
+
+  const multipartInitResponse = await postJson(baseUrl, '/api/storage/multipart/initiate', {
+    fileName: 'multipart-video.mp4',
+    contentType: 'video/mp4',
+    fileSizeBytes: 32,
+    partSizeBytes: 5 * 1024 * 1024,
+  }, ownerToken, 'https://streempuls.mooo.com');
+  assert.equal(multipartInitResponse.status, 200, await multipartInitResponse.clone().text());
+  const multipart = await multipartInitResponse.json();
+  assert.equal(multipart.partCount, 1);
+  assert.equal(multipart.cors.exposeHeaders.includes('ETag'), true);
+  assert.match(multipart.uploadId, /^[0-9a-f-]{36}$/i);
+
+  const otherPartUrlResponse = await postJson(baseUrl, '/api/storage/multipart/presign-part', {
+    key: multipart.key,
+    uploadId: multipart.uploadId,
+    partNumber: 1,
+  }, otherToken);
+  assert.equal(otherPartUrlResponse.status, 404, 'another user cannot sign an owner upload part');
+
+  const invalidPartUrlResponse = await postJson(baseUrl, '/api/storage/multipart/presign-part', {
+    key: multipart.key,
+    uploadId: multipart.uploadId,
+    partNumber: 2,
+  }, ownerToken);
+  assert.equal(invalidPartUrlResponse.status, 400, 'part numbers are bounded by the initiated upload');
+
+  const partUrlResponse = await postJson(baseUrl, '/api/storage/multipart/presign-part', {
+    key: multipart.key,
+    uploadId: multipart.uploadId,
+    partNumber: 1,
+  }, ownerToken, 'https://streempuls.mooo.com');
+  assert.equal(partUrlResponse.status, 200);
+  const partUrl = await partUrlResponse.json();
+  assert.equal(partUrl.headers['Content-Type'], 'video/mp4');
+  const multipartBytes = Buffer.from('multipart R2 upload payload');
+  const partResponse = await fetch(partUrl.uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'video/mp4' },
+    body: multipartBytes,
+  });
+  assert.equal(partResponse.status, 200);
+  const partEtag = partResponse.headers.get('etag');
+  assert.ok(partEtag);
+
+  const missingPartsResponse = await postJson(baseUrl, '/api/storage/multipart/complete', {
+    key: multipart.key,
+    uploadId: multipart.uploadId,
+    parts: [],
+  }, ownerToken);
+  assert.equal(missingPartsResponse.status, 400);
+
+  const otherCompleteResponse = await postJson(baseUrl, '/api/storage/multipart/complete', {
+    key: multipart.key,
+    uploadId: multipart.uploadId,
+    parts: [{ PartNumber: 1, ETag: partEtag }],
+  }, otherToken);
+  assert.equal(otherCompleteResponse.status, 404);
+
+  const completeResponse = await postJson(baseUrl, '/api/storage/multipart/complete', {
+    key: multipart.key,
+    uploadId: multipart.uploadId,
+    parts: [{ PartNumber: 1, ETag: partEtag }],
+  }, ownerToken);
+  assert.equal(completeResponse.status, 200);
+  const repeatedCompleteResponse = await postJson(baseUrl, '/api/storage/multipart/complete', {
+    key: multipart.key,
+    uploadId: multipart.uploadId,
+    parts: [{ PartNumber: 1, ETag: partEtag }],
+  }, ownerToken);
+  assert.equal(repeatedCompleteResponse.status, 200, 'completion retries are idempotent after R2 assembly');
+
+  const multipartConfirmResponse = await postJson(baseUrl, '/api/storage/confirm-upload', {
+    key: multipart.key,
+    fileName: 'multipart-video.mp4',
+    provider: 'r2',
+  }, ownerToken);
+  assert.equal(multipartConfirmResponse.status, 200);
+  const multipartConfirmation = await multipartConfirmResponse.json();
+  assert.equal(multipartConfirmation.asset.sizeBytes, multipartBytes.length);
+  assert.equal(multipartConfirmation.asset.contentType, 'video/mp4');
+
+  const abortInitResponse = await postJson(baseUrl, '/api/storage/multipart/initiate', {
+    fileName: 'cancelled-video.mp4',
+    contentType: 'video/mp4',
+    fileSizeBytes: 32,
+    partSizeBytes: 5 * 1024 * 1024,
+  }, ownerToken);
+  assert.equal(abortInitResponse.status, 200);
+  const abortUpload = await abortInitResponse.json();
+  const otherAbortResponse = await postJson(baseUrl, '/api/storage/multipart/abort', {
+    key: abortUpload.key,
+    uploadId: abortUpload.uploadId,
+  }, otherToken);
+  assert.equal(otherAbortResponse.status, 404);
+  const abortResponse = await postJson(baseUrl, '/api/storage/multipart/abort', {
+    key: abortUpload.key,
+    uploadId: abortUpload.uploadId,
+  }, ownerToken);
+  assert.equal(abortResponse.status, 200);
+  assert.equal(multipartUploads.has(abortUpload.uploadId), false);
 });

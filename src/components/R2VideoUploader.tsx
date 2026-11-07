@@ -77,6 +77,7 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
   const [isDragging, setIsDragging] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [uploadStage, setUploadStage] = useState<string>('');
+  const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadedAsset, setUploadedAsset] = useState<StorageUploadedAsset | null>(null);
   const [serverAssets, setServerAssets] = useState<StorageUploadedAsset[]>([]);
@@ -85,6 +86,7 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
   const [activeBucket, setActiveBucket] = useState<string>('stream-assets');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadControllerRef = useRef<AbortController | null>(null);
 
   // Load real media assets and active storage adapter status from backend API
   const loadAssets = async () => {
@@ -125,20 +127,23 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
     loadAssets();
   }, []);
 
+  React.useEffect(() => () => uploadControllerRef.current?.abort(), []);
+
   const handleFileProcess = async (file: File) => {
+    if (uploadControllerRef.current) return;
     if (!file.name.match(/\.(mp4|m4v|mov|mkv)$/i)) {
       alert('Please select a valid MP4 video file.');
       return;
     }
 
-    // R2 single-part PutObject supports objects up to 5 GB. Multipart upload is
-    // intentionally not used here; large files should be split with an S3 multipart flow.
-    const maxSinglePutBytes = 5_000_000_000;
-    if (file.size > maxSinglePutBytes) {
-      setUploadError('This file exceeds the 5 GB direct-upload limit. Multipart uploads are not configured.');
+    if (!file.size || file.size > 5 * 1024 * 1024 * 1024 * 1024) {
+      setUploadError('Choose a non-empty video no larger than Cloudflare R2’s 5 TiB multipart limit.');
       return;
     }
 
+    const uploadController = new AbortController();
+    uploadControllerRef.current = uploadController;
+    setIsUploading(true);
     const localBlobUrl = URL.createObjectURL(file);
     const sizeInMb = +(file.size / (1024 * 1024)).toFixed(1);
     const contentType = file.type || 'video/mp4';
@@ -147,20 +152,18 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
       .replace(/[-_]/g, ' ')
       .replace(/\b\w/g, (c) => c.toUpperCase());
 
-    setUploadProgress(5);
+    setUploadProgress(0);
     setUploadError(null);
-    setUploadStage('Requesting secure presigned upload URL from Cloudflare R2...');
+    setUploadStage('Starting secure Cloudflare R2 multipart upload...');
 
     try {
-      // 1. Direct Cloudflare R2 Presigned Upload (Bypasses backend server)
+      // Parts stream directly to R2; the backend only creates/signs/assembles them.
       const response = await apiClient.uploadDirectToR2(file, (percent) => {
         setUploadProgress(percent);
-        if (percent < 90) {
-          setUploadStage(`Streaming directly to Cloudflare R2 bucket (${percent}% - Bypassing Backend)...`);
-        } else {
-          setUploadStage('Registering Direct-Copy H.264 video streams in Cloudflare R2 catalog...');
-        }
-      });
+        setUploadStage(percent < 99
+          ? `Uploading multipart chunks directly to Cloudflare R2 (${percent}%)...`
+          : 'Assembling R2 chunks and registering the video...');
+      }, uploadController.signal);
 
       setUploadProgress(100);
       setUploadStage(`Asset stored directly in ${response.storageProvider}! (Zero backend bandwidth consumed)`);
@@ -181,17 +184,23 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
 
       setUploadedAsset(asset);
     } catch (err: any) {
-      console.error('[Direct R2 Upload Failed]', err);
+      console.error('[R2 Multipart Upload Failed]', err);
       URL.revokeObjectURL(localBlobUrl);
       setUploadProgress(null);
       setUploadStage('');
-      setUploadError(err.message || 'Direct Cloudflare R2 upload failed. The video was not sent to the backend.');
+      setUploadError(err.name === 'AbortError'
+        ? 'Upload cancelled. Incomplete R2 chunks were cleaned up.'
+        : err.message || 'Cloudflare R2 multipart upload failed. The video was not sent through the backend.');
+    } finally {
+      if (uploadControllerRef.current === uploadController) uploadControllerRef.current = null;
+      setIsUploading(false);
     }
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
+    if (uploadControllerRef.current) return;
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       handleFileProcess(e.dataTransfer.files[0]);
     }
@@ -228,7 +237,10 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={() => {
+              uploadControllerRef.current?.abort();
+              onClose();
+            }}
             className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer transition-colors"
           >
             <X className="w-4 h-4" />
@@ -278,8 +290,8 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
                   }}
                   onDragLeave={() => setIsDragging(false)}
                   onDrop={handleDrop}
-                  onClick={() => fileInputRef.current?.click()}
-                  className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all ${
+                  onClick={() => !isUploading && fileInputRef.current?.click()}
+                  className={`border-2 border-dashed rounded-2xl p-8 text-center transition-all ${isUploading ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'} ${
                     isDragging
                       ? 'border-emerald-500 bg-emerald-950/20'
                       : 'border-slate-700 bg-slate-950/50 hover:border-slate-500 hover:bg-slate-950/80'
@@ -289,6 +301,7 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
                     type="file"
                     ref={fileInputRef}
                     onChange={(e) => e.target.files?.[0] && handleFileProcess(e.target.files[0])}
+                    disabled={isUploading}
                     accept="video/mp4,video/x-m4v,video/*"
                     className="hidden"
                   />
@@ -315,7 +328,18 @@ export const SupabaseStorageUploader: React.FC<StorageVideoUploaderProps> = ({ o
                   <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
                     <div className="flex justify-between items-center text-xs font-mono">
                       <span className="text-slate-300 font-semibold">{uploadStage}</span>
-                      <span className="text-emerald-400 font-bold">{uploadProgress}%</span>
+                      <div className="flex items-center gap-3">
+                        <span className="text-emerald-400 font-bold">{uploadProgress}%</span>
+                        {isUploading && (
+                          <button
+                            type="button"
+                            onClick={() => uploadControllerRef.current?.abort()}
+                            className="rounded-lg border border-slate-700 px-2 py-1 text-slate-300 hover:bg-slate-800"
+                          >
+                            Cancel
+                          </button>
+                        )}
+                      </div>
                     </div>
                     <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
                       <div
